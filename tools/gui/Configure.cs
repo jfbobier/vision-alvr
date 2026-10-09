@@ -324,11 +324,16 @@ namespace VisionALVR
             benchStatus.Text = "Encoder test running...";
             void next()
             {
-                if (profiles.Count == 0) { benchStatus.Text = "Encoder test done. 'fits' = p95 under 90% of the frame time."; StartDiscovery(); return; }
+                if (profiles.Count == 0)
+                {
+                    if (!benchStatus.Text.StartsWith("Encoder test failed")) benchStatus.Text = "Encoder test done. 'fits' = p95 under 90% of the frame time.";
+                    StartDiscovery(); return;
+                }
                 var prof = profiles.Dequeue();
                 bench = new HostProcess();
                 bench.OnEvent += (n, d) => BeginInvoke((Action)(() =>
                 {
+                    if (n == "setup_error") { benchStatus.Text = $"Encoder test failed: {d?["message"]}"; profiles.Clear(); return; }
                     if (n != "bench" || d == null) return;
                     var fits = d.TryGetValue("fits", out var ff) && ff is bool fb && fb;
                     var item = new ListViewItem(new[] { $"encoder {prof} {d["width"]}x{d["height"]}", "", Fmt(d, "fps", "0"), "", "", $"{Fmt(d, "p50_ms", "0.0")}/{Fmt(d, "p95_ms", "0.0")}", "", "", fits ? "fits" : "too slow" });
@@ -387,6 +392,7 @@ namespace VisionALVR
                         Log.Write("INFO", "quality benchmark: " + benchStatus.Text.Replace("\n", " | "));
                         break;
                     case "bq_error": benchStatus.Text = $"Quality benchmark failed: {d?["message"]}"; break;
+                    case "setup_error": benchStatus.Text = $"Quality benchmark failed: {d?["message"]}"; break;
                 }
             }));
             bench.OnExit += c => BeginInvoke((Action)(() => { if (c != 0 && !benchStatus.Text.StartsWith("Quality benchmark failed")) benchStatus.Text = $"Quality benchmark ended (code {c}) - see logs"; StartDiscovery(); }));
@@ -410,6 +416,7 @@ namespace VisionALVR
                 switch (n)
                 {
                     case "client_connected": benchStatus.Text = "Headset connected; testing..."; break;
+                    case "setup_error": benchStatus.Text = $"Network test failed: {d?["message"]}"; break;
                     case "bench_step_start": benchStatus.Text = $"Testing {d?["target_mbps"]} Mbps (step {Convert.ToInt32(d?["step"]) + 1})..."; break;
                     case "bench_step":
                         benchList.Items.Add(new ListViewItem(new[] { $"network {Fmt(d, "target_mbps", "0")} Mbps", Fmt(d, "actual_mbps", "0"), Fmt(d, "client_fps", "0"),
@@ -432,7 +439,7 @@ namespace VisionALVR
                         break;
                 }
             }));
-            bench.OnExit += c => BeginInvoke((Action)(() => { if (!applyBitrate.Enabled && !benchStatus.Text.StartsWith("No step")) benchStatus.Text = $"Network test ended (code {c}) - see logs"; StartDiscovery(); }));
+            bench.OnExit += c => BeginInvoke((Action)(() => { if (!applyBitrate.Enabled && !benchStatus.Text.StartsWith("No step") && !benchStatus.Text.StartsWith("Network test failed")) benchStatus.Text = $"Network test ended (code {c}) - see logs"; StartDiscovery(); }));
             var err = bench.Start($"--install-dir \"{Paths.Dir}\" --benchmark-network {list} --bench-step-s {stepSecs.Value} --connect-timeout 120 --seconds 900 --encode-profile {(profFull.Checked ? "full-split" : "foveated")}");
             if (err != null) { benchStatus.Text = err; StartDiscovery(); }
         }

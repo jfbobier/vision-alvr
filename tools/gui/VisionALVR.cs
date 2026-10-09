@@ -27,6 +27,7 @@ namespace VisionALVR
         string pairedName = "", pairedIp = "";
         bool closing;
         int restarts;
+        string setupError;   // the streamer's `setup_error` message: a problem to fix, restarting it would not help
 
         public RuntimeForm(Dictionary<string, object> check)
         {
@@ -153,6 +154,13 @@ namespace VisionALVR
             Log.Write("ERROR", $"alvr_host.exe exited unexpectedly (code {code})");
             headset.Text = "Streamer stopped (see logs)";
             headset.ForeColor = Color.Firebrick;
+            if (code == 7)   // setup problem (e.g. config\session.json missing or broken): say what to do, do not restart
+            {
+                headset.Text = "Setup problem: the streamer cannot start";
+                footer.Text = setupError ?? "The streamer reported a setup problem. Check logs\\VisionALVR.log.";
+                footer.ForeColor = Color.Firebrick;
+                return;
+            }
             if (restarts++ < 3)
             {
                 footer.Text = $"The streamer exited (code {code}); restarting ({restarts}/3)...";
@@ -171,6 +179,9 @@ namespace VisionALVR
         {
             switch (name)
             {
+                case "setup_error":
+                    setupError = S(d, "message");
+                    break;
                 case "client_connected":
                     var n = S(d, "name");
                     var ip = S(d, "ip");

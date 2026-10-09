@@ -706,6 +706,39 @@ fn configure_encoder(session_path: &std::path::Path, split_mode: i64, qp_map: bo
     (w, h, c["refresh_rate"].as_f64().unwrap_or(90.0))
 }
 
+/// Exit code for a setup problem the user has to fix (missing or broken config); restarting the streamer cannot help.
+const EXIT_SETUP: i32 = 7;
+
+/// Reports a setup problem in plain words (stderr, the general log, a `setup_error` event the GUIs show) and exits.
+fn setup_fail(origin: Instant, message: &str) -> ! {
+    eprintln!("{message}");
+    logs::general("ERROR", message);
+    event(origin, "setup_error", json!({ "message": message }));
+    std::process::exit(EXIT_SETUP);
+}
+
+/// The session ALVR, the encoder and the benchmarks read: present and valid JSON, else a message that says what to do.
+fn check_session(path: &std::path::Path, installed: bool) -> Result<(), String> {
+    let text = match fs::read_to_string(path) {
+        Ok(t) => t,
+        Err(_) if installed => {
+            return Err("config\\session.json is missing and there is no config\\session.default.json to create it from: this \
+                        VisionALVR folder is incomplete. Unzip the release again (you can keep your config\\ folder)."
+                .into())
+        }
+        Err(e) => return Err(format!("cannot read the session {}: {e} (pass --session <file> or --install-dir <VisionALVR folder>)", path.display())),
+    };
+    match serde_json::from_str::<serde_json::Value>(&text) {
+        Ok(v) if v.is_object() => Ok(()),
+        Ok(_) => Err(format!("{} is not an ALVR session (expected a JSON object)", path.display())),
+        Err(e) => Err(format!(
+            "{} is not valid JSON ({e}). Fix the edit, or delete the file to start again from config\\session.default.json \
+             (your headset pairing is stored in it: pair again with configure.exe).",
+            path.display()
+        )),
+    }
+}
+
 /// Vision Pro views measured in the pilot (visionalvr_views.json): used until the headset has sent its own.
 const AVP_DEFAULT_FOV: [f32; 8] = [1.7823, 1.0186, 1.2169, 1.0186, 1.0249, 1.7995, 1.2253, 1.0249];
 const AVP_DEFAULT_IPD: f32 = 0.0623;
@@ -1007,7 +1040,14 @@ fn main() {
         // The session also holds ALVR's trusted-client list and the user's edits: only seed it, never overwrite.
         let dest = args.config_dir.join("session.json");
         if !dest.exists() || args.force_session {
-            fs::copy(s, dest).expect("copy session template");
+            if let Err(e) = fs::copy(s, &dest) {
+                setup_fail(origin, &format!("cannot copy the session {} to {}: {e}", s.display(), dest.display()));
+            }
+        }
+    }
+    if args.live || args.bench_quality {
+        if let Err(m) = check_session(&args.config_dir.join("session.json"), install.is_some()) {
+            setup_fail(origin, &m);
         }
     }
     if args.live {
