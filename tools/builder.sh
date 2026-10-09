@@ -37,13 +37,14 @@ case "$mode" in
   run)
     cmd="${1:?usage: builder.sh run '<cmd>'}"
     guard "$cmd"
-    ssh "${SSH_OPTS[@]}" "$HOST" "cd /d %USERPROFILE%\\openxr && $cmd" 2>&1 | filter
+    # the working folder is created on first use (fresh builder, or after the user removed it)
+    ssh "${SSH_OPTS[@]}" "$HOST" "(if not exist %USERPROFILE%\\openxr mkdir %USERPROFILE%\\openxr) & cd /d %USERPROFILE%\\openxr && $cmd" 2>&1 | filter
     ;;
   ps)
     script="${1:?usage: builder.sh ps script.ps1 [args]}"; shift
     [[ -f "$script" ]] || { echo "no such script: $script" >&2; exit 2; }
     guard "$(cat "$script")"
-    ssh "${SSH_OPTS[@]}" "$HOST" "if not exist %USERPROFILE%\\openxr\\_tmp mkdir %USERPROFILE%\\openxr\\_tmp" 2>&1 | filter
+    ssh "${SSH_OPTS[@]}" "$HOST" "if not exist %USERPROFILE%\\openxr\\_tmp mkdir %USERPROFILE%\\openxr\\_tmp" 2>&1 | filter   # mkdir creates openxr too
     base="$(basename "$script")"
     scp "${SSH_OPTS[@]}" "$script" "$HOST:openxr/_tmp/$base" 2>&1 | filter
     ssh "${SSH_OPTS[@]}" "$HOST" "cd /d %USERPROFILE%\\openxr && powershell -NoProfile -ExecutionPolicy Bypass -File _tmp\\$base $*" 2>&1 | filter
@@ -51,6 +52,7 @@ case "$mode" in
   put)
     src="${1:?usage: put local remote_rel}"; dst="${2:?usage: put local remote_rel}"
     [[ "$dst" != /* && "$dst" != *..* && "$dst" != *:* ]] || { echo "remote path must be relative to ~/openxr" >&2; exit 2; }
+    ssh "${SSH_OPTS[@]}" "$HOST" "if not exist %USERPROFILE%\\openxr mkdir %USERPROFILE%\\openxr" 2>&1 | filter
     scp -r "${SSH_OPTS[@]}" "$src" "$HOST:openxr/$dst" 2>&1 | filter
     ;;
   get)
