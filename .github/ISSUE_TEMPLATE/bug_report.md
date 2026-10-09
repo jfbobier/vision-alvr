@@ -8,7 +8,8 @@ labels: bug
 
 **Game** and how it is started (native OpenXR, UEVR, mod, emulator; elevated or not):
 
-**PC**: GPU, driver version, Windows version. **Headset**: visionOS version, ALVR app version. **Network**: Wi-Fi band, router.
+**PC**: GPU (RTX 40 series or newer), driver version, Windows version. **Headset** (Apple Vision Pro only; other ALVR headsets
+are not supported): visionOS version, ALVR app version. **Network**: Wi-Fi band, router.
 
 **Logs** (please attach both): `logs\VisionALVR.log`, and the `logs\debug\<time>\` folder of the run (turn debug on in
 VisionALVR.exe, reproduce, then zip that folder). They contain your headset's name and LAN address; remove them if you prefer.

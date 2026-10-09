@@ -4,8 +4,10 @@ Thanks for helping. A few things keep this project workable:
 
 ## Scope
 - **Headset: Apple Vision Pro with the stock ALVR visionOS app only.** The ALVR 20.14.1 protocol stays unchanged so the app
-  cannot tell the difference. Other headsets are out of scope (use ALVR itself).
-- **GPU: NVIDIA only** (NVENC). The point of the project is an encode path written for one vendor.
+  cannot tell the difference. Other ALVR headsets may connect (the protocol is device agnostic) but are out of scope: issues
+  and pull requests for them will be closed (use ALVR itself).
+- **GPU: NVIDIA only** (NVENC), RTX 40 series or newer for users. The point of the project is an encode path written for one
+  vendor. **OS: Windows** for the streamer.
 - OpenXR games only (no SteamVR/OpenVR games).
 
 ## Before a pull request

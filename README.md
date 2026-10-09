@@ -2,7 +2,18 @@
 
 Stream PC OpenXR games to **Apple Vision Pro** with the stock **ALVR** visionOS app, **without SteamVR**, on NVIDIA GPUs.
 
-> **Alpha software (0.1).** It runs real games on an RTX 5090 + Vision Pro, but expect rough edges. Use at your own risk.
+> [!WARNING]
+> **ALPHA SOFTWARE (0.1): TEST AT YOUR OWN RISK.**
+> On a real headset it has been tested by one person, on one PC (RTX 5090) with one Vision Pro (plus automated tests on a
+> laptop GPU). Games may crash, fail to start, or show a broken image; the stream may stutter or have high latency. It changes your PC's OpenXR runtime registration and adds a firewall rule
+> (both undone by `unregister_openxr_runtime.bat`). Keep comfort in mind: a frozen or juddering image in a headset can cause
+> discomfort; take the headset off if anything looks wrong. Provided "as is", without warranty of any kind (see [LICENSE](LICENSE)).
+
+**Target, and only target:** the **Windows** streamer on an **NVIDIA GeForce RTX 40 series or newer** GPU, with the
+**ALVR app (20.14.x) on Apple Vision Pro**.
+The ALVR protocol is device agnostic, so other ALVR clients (Quest, Pico, ...) may well connect, but they are untested and
+not supported: encoder settings, defaults and the idle chroma-key frame are tuned for the Vision Pro. Issues and pull requests
+for other headsets or GPU vendors will be closed; please use [ALVR](https://github.com/alvr-org/ALVR) itself for those.
 
 VisionALVR replaces the SteamVR + ALVR server pair on the PC with one lean streamer. It speaks the ALVR 20.14.1 protocol
 unchanged, so the ALVR app on the headset sees an ordinary ALVR server. In between, it does less work:
@@ -61,11 +72,28 @@ See [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md) and [CONTRIBUTING.md](CONTRIBUTIN
 | `third_party/` | vendored headers (cgltf, stb_image) and licence texts |
 | `docs/` | install guide, benchmark design, progress log |
 
+## Relationship to upstream (how much is forked)
+Nothing is a long-lived fork: ALVR and VirtualDesktop-OpenXR are fetched at pinned upstream commits (`deps.lock.json`) and
+built with small, asserted patches, so an upstream change fails loudly instead of drifting.
+| Upstream | How it is used | Changes |
+|---|---|---|
+| **ALVR v20.14.1** (Rust) | `server_core`, protocol, sockets, audio, session crates linked into `alvr_host` as a workspace member; client_core in the test client | one patch, 26 changed lines (`tools/patches/loopback-client.patch`): lets the test client bind its own loopback address; inactive unless `ALVR_BIND_IP` is set (it is compiled into `alvr_host.exe` through the shared `sockets` crate) |
+| **ALVR encoder C++** (`VideoEncoderNVENC`, `NvEncoder*`, foveated encoding `FFR`, ~3,900 lines + NVIDIA's header) | vendored **unmodified** in `nvenc/upstream/` (checksums) | about 20 asserted build-time text replacements in `tools/host/build.rs`: 10-bit texture format, NVENC SDK 12.2 field names, a struct initializer the newer SDK broke, real error messages, split-frame encoding, QP delta map, reconstructed-frame output, accessors and a config dump |
+| **VirtualDesktop-OpenXR** (the OpenXR runtime) | built from upstream at a pinned commit | 2 text patches + 1 define at build time (`tools/remote/stage15_vdxr.ps1`): per-eye visibility on quad/cylinder/cube layers in "Oculus runtime" mode, all 6 faces of cube swapchains, advertise the cube-layer extension |
+| **VDXR's OVRNull** (sample "null" LibOVR driver) | `ovrshim/` = OVRShim, the one real fork | `driver.cpp` grew from 793 to ~1,850 lines (~1,190 new or changed), 6 new files (IPC, layer shaders); OVRNull's other ~1,570 lines are used unchanged |
+
+Everything else is new code (~11,000 lines): the host (`tools/host`, Rust), the encoder library and benchmark
+(`nvenc/hostlib`, C++), the GUIs, the installer scripts, the mock client, the OpenXR probe and the harness.
+
 ## Credits
-- [ALVR](https://github.com/alvr-org/ALVR) (MIT): protocol, server core and encoder code; the
-  [ALVR visionOS client](https://github.com/alvr-org/alvr-visionos) on the headset.
-- [VirtualDesktop-OpenXR](https://github.com/mbucchia/VirtualDesktop-OpenXR) by Matthieu Bucchianeri (MIT): the OpenXR runtime;
-  OVRShim is a fork of its OVRNull.
+VisionALVR stands on two projects that did the hard work:
+- **[ALVR](https://github.com/alvr-org/ALVR)** (MIT) by polygraphene and the alvr-org contributors: the foundational
+  infrastructure this is built on, its streaming protocol, server core, networking, audio, foveated encoding and NVENC
+  encoder code, and the [ALVR visionOS client](https://github.com/alvr-org/alvr-visionos) that runs on the headset.
+  VisionALVR exists because ALVR made wireless PC VR open.
+- **[VirtualDesktop-OpenXR (VDXR)](https://github.com/mbucchia/VirtualDesktop-OpenXR)** (MIT) by Matthieu Bucchianeri and its
+  contributors: the excellent, highly optimized OpenXR runtime every game here runs on; OVRShim started as its OVRNull sample.
+  Thanks also for the many other OpenXR tools from the same author that the PC VR community relies on.
 - NVIDIA Video Codec SDK header (MIT). cgltf (MIT), stb_image (public domain / MIT), Draco (Apache-2.0, offline converter only).
 - Benchmark scene: "Littlest Tokyo" by Glen Fox ([glenatron](https://sketchfab.com/glenatron)), CC-BY-4.0, converted and placed
   in a textured room.
