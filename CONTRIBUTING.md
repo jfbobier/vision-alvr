@@ -11,9 +11,10 @@ Thanks for helping. A few things keep this project workable:
 - OpenXR games only (no SteamVR/OpenVR games).
 
 ## Before a pull request
-1. Set up a builder and run the harness (`docs/DEVELOPMENT.md`).
-2. Run the scenarios your change touches, and `python3 harness/run.py all` for anything in the host, the encoder library or the
-   shim. Installer changes: `test-install`; package changes: `test-zip`; benchmark changes: `bench-quality full`.
+1. Build on Windows with `build.ps1` (`docs/DEVELOPMENT.md`) and try your change with a game and the headset if you can.
+2. If you can run the automated harness (optional, `docs/DEVELOPMENT.md`): the scenarios your change touches, and
+   `python3 harness/run.py all` for anything in the host, the encoder library or the shim. Installer changes: `test-install`;
+   package changes: `test-zip`; benchmark changes: `bench-quality full`.
 3. In the pull request, say what you **tested** (scenario names, measurements, headset if any) and what you did **not**
    test. "Builds" is not "works". Add a line to `docs/progress.md` for anything a user would notice.
 

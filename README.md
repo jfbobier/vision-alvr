@@ -70,7 +70,7 @@ git clone https://github.com/jfbobier/vision-alvr.git
 cd vision-alvr
 powershell -ExecutionPolicy Bypass -File build.ps1
 ```
-The first run fetches ALVR v20.14.1 and VirtualDesktop-OpenXR at pinned commits and builds them (allow 30-60 minutes); the
+The first run fetches ALVR v20.14.1 and VirtualDesktop-OpenXR at pinned commits and builds them (10+ minutes, ~6 GB); the
 result is the same portable folder and zip as the release, in `out\dist\`. An automated test harness (end-to-end scenarios with
 a headless mock ALVR client, no headset needed) is described in [harness/README.md](harness/README.md).
 See also [CONTRIBUTING.md](CONTRIBUTING.md).
