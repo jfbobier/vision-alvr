@@ -1,7 +1,7 @@
 # Runs the host encoder bench while sampling the NVIDIA GPU; prints clocks/pstate during the busy window.
 param([string]$Extra = '', [int]$Frames = 150, [int]$SleepMs = 0, [string]$Label = 'bench', [switch]$Decode)
 $ErrorActionPreference = 'Continue'
-$root = "$env:USERPROFILE\openxr"
+$root = if ($env:VISIONALVR_ROOT) { $env:VISIONALVR_ROOT } else { "$env:USERPROFILE\openxr" }
 $csv = "$root\logs\gpu_$Label.csv"
 $smi = Start-Process -FilePath nvidia-smi -ArgumentList "--query-gpu=pstate,clocks.sm,clocks.video,utilization.gpu,utilization.encoder,utilization.decoder,power.draw --format=csv,noheader -lms 250" -RedirectStandardOutput $csv -PassThru -WindowStyle Hidden
 $dec = $null

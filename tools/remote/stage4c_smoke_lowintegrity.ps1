@@ -2,7 +2,7 @@ $ErrorActionPreference = 'Continue'
 # Runs a command in the logged-on user's interactive session at MEDIUM integrity (not elevated),
 # via a temporary scheduled task that this script creates and removes. Needed because the OpenXR
 # loader ignores XR_RUNTIME_JSON for elevated processes and SSH sessions hold a full admin token.
-$root  = "$env:USERPROFILE\openxr"
+$root  = if ($env:VISIONALVR_ROOT) { $env:VISIONALVR_ROOT } else { "$env:USERPROFILE\openxr" }
 $rt    = "$root\out\vdxr-null"
 $hxdir = "$root\build\oxr-sdk\src\tests\hello_xr\Release"
 $cmd   = "$root\out\smoke_run.cmd"

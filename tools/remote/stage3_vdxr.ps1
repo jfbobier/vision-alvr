@@ -1,5 +1,5 @@
 $ErrorActionPreference = 'Continue'
-$root = "$env:USERPROFILE\openxr"
+$root = if ($env:VISIONALVR_ROOT) { $env:VISIONALVR_ROOT } else { "$env:USERPROFILE\openxr" }
 $msbuild = 'C:\Program Files\Microsoft Visual Studio\2022\Community\MSBuild\Current\Bin\MSBuild.exe'
 Set-Location "$root\src\VDXR"
 Write-Host "=== msbuild virtualdesktop-openxr (Release x64)"

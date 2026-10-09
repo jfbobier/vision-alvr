@@ -2,7 +2,7 @@
 # itself: nothing but the shipped files, logs\ created on first run, the general log appended by every run, one debug session
 # folder per run with debug on, config seeded, the quality benchmark finding its scene. Never touches the registry.
 $ErrorActionPreference = 'Continue'
-$root = "$env:USERPROFILE\openxr"
+$root = if ($env:VISIONALVR_ROOT) { $env:VISIONALVR_ROOT } else { "$env:USERPROFILE\openxr" }
 $zip = Get-ChildItem "$root\out\dist\VisionALVR-*.zip" | Select-Object -First 1
 $t = "$root\runs\ziptest\$((Get-Date).ToString('yyyyMMdd-HHmmss'))"
 New-Item -ItemType Directory -Force $t | Out-Null

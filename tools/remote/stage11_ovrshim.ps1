@@ -1,7 +1,7 @@
 # Builds OVRShim (fork of VDXR's OVRNull with the host-driven driver) and assembles out\vdxr-shim.
 $ErrorActionPreference = 'Continue'
 $start = Get-Date
-$root = "$env:USERPROFILE\openxr"
+$root = if ($env:VISIONALVR_ROOT) { $env:VISIONALVR_ROOT } else { "$env:USERPROFILE\openxr" }
 $vdxr = "$root\src\VDXR"
 $dst  = "$vdxr\OVRShim"
 $msbuild = 'C:\Program Files\Microsoft Visual Studio\2022\Community\MSBuild\Current\Bin\MSBuild.exe'

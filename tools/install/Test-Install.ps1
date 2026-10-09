@@ -2,7 +2,7 @@
 # and scratch folders: register, re-register, WhatIf, unregister (restores the previous runtime), no previous runtime, a
 # foreign runtime activated meanwhile, a moved folder, and taking over an earlier install (ClearXR / VisionALVR in Program Files).
 $ErrorActionPreference = 'Stop'
-$root = "$env:USERPROFILE\openxr"
+$root = if ($env:VISIONALVR_ROOT) { $env:VISIONALVR_ROOT } else { "$env:USERPROFILE\openxr" }
 $pkg = "$root\out\dist\VisionALVR"
 $tmp = "$root\runs\install_test"
 $testRoot = 'HKCU:\Software\VisionALVRTest'

@@ -1,5 +1,5 @@
 $ErrorActionPreference = 'Continue'
-$root = "$env:USERPROFILE\openxr"
+$root = if ($env:VISIONALVR_ROOT) { $env:VISIONALVR_ROOT } else { "$env:USERPROFILE\openxr" }
 $env:Path = [System.Environment]::GetEnvironmentVariable('Path','Machine') + ';' + [System.Environment]::GetEnvironmentVariable('Path','User')
 Set-Location "$root\src\VDXR"
 Write-Host "=== VDXR bin"

@@ -1,6 +1,6 @@
 # Idempotently applies tools/patches/loopback-client.patch to the builder's ALVR v20.14.1 checkout.
 $ErrorActionPreference = 'Continue'
-$root = "$env:USERPROFILE\openxr"
+$root = if ($env:VISIONALVR_ROOT) { $env:VISIONALVR_ROOT } else { "$env:USERPROFILE\openxr" }
 Set-Location "$root\src\ALVR-v20.14.1"
 $patch = "$root\_tmp\loopback-client.patch"
 git apply --reverse --check $patch 2>$null

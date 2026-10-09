@@ -7,7 +7,7 @@
 param([switch]$Unpatched)
 $ErrorActionPreference = 'Continue'
 $start = Get-Date
-$root = "$env:USERPROFILE\openxr"
+$root = if ($env:VISIONALVR_ROOT) { $env:VISIONALVR_ROOT } else { "$env:USERPROFILE\openxr" }
 $src = "$root\src\VDXR\virtualdesktop-openxr"
 $msbuild = 'C:\Program Files\Microsoft Visual Studio\2022\Community\MSBuild\Current\Bin\MSBuild.exe'
 

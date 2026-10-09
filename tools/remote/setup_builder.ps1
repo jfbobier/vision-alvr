@@ -1,13 +1,14 @@
 # One-time setup of a builder (the Windows PC that builds and runs VisionALVR; see docs/DEVELOPMENT.md). Idempotent:
 #  1. checks the toolchain (git, rustup/cargo, cmake, clang, nuget, Visual Studio 2022 with C++),
-#  2. clones ALVR v20.14.1 and VirtualDesktop-OpenXR at the commits pinned in deps.lock.json (uploaded to _tmp\deps.lock.json)
-#     into <Src> (default %USERPROFILE%\openxr\src) and verifies them (existing clones are verified, never changed),
+#  2. clones ALVR v20.14.1 and VirtualDesktop-OpenXR at the commits pinned in deps.lock.json (<root>\_tmp\deps.lock.json)
+#     into <Src> (default <root>\src; root = $env:VISIONALVR_ROOT or %USERPROFILE%\openxr) and verifies them (existing clones are verified, never changed),
 #  3. builds what the later stages expect: VDXR (unpatched, + out\vdxr-null), the OpenXR loader (build\oxr-sdk), ALVR's
 #     server_core once (fetches the crates).
 # -CloneOnly stops after step 2 (used to test the clone step into another folder).
-param([string]$Src = "$env:USERPROFILE\openxr\src", [switch]$CloneOnly)
+param([string]$Src = '', [switch]$CloneOnly)
 $ErrorActionPreference = 'Continue'
-$root = "$env:USERPROFILE\openxr"
+$root = if ($env:VISIONALVR_ROOT) { $env:VISIONALVR_ROOT } else { "$env:USERPROFILE\openxr" }
+if (-not $Src) { $Src = "$root\src" }
 $env:Path = [System.Environment]::GetEnvironmentVariable('Path','Machine') + ';' + [System.Environment]::GetEnvironmentVariable('Path','User') + ';C:\Program Files\LLVM\bin'
 $fails = 0
 function Step($name, $ok, $detail) { if (-not $ok) { $script:fails++ }; Write-Host ("SETUP {0} {1}: {2}" -f $(if ($ok) { 'ok  ' } else { 'FAIL' }), $name, $detail) }

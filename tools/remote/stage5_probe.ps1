@@ -1,7 +1,7 @@
 $ErrorActionPreference = 'Continue'
 # Builds tools/probe/xr_probe.cpp on the builder, then runs it against VDXR+OVRNull at LIMITED integrity
 # via a temporary scheduled task (see stage4c). PASS/FAIL is taken from the probe's own log + exit code.
-$root = "$env:USERPROFILE\openxr"
+$root = if ($env:VISIONALVR_ROOT) { $env:VISIONALVR_ROOT } else { "$env:USERPROFILE\openxr" }
 $sdk  = "$root\src\VDXR\external\OpenXR-SDK\include"
 $lib  = "$root\build\oxr-sdk\src\loader\Release\openxr_loader.lib"
 $rt   = "$root\out\vdxr-null"

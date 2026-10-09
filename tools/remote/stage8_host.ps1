@@ -1,6 +1,6 @@
 # Builds alvr_host inside the builder's ALVR v20.14.1 checkout (workspace member via alvr/* glob).
 $ErrorActionPreference = 'Continue'
-$root = "$env:USERPROFILE\openxr"
+$root = if ($env:VISIONALVR_ROOT) { $env:VISIONALVR_ROOT } else { "$env:USERPROFILE\openxr" }
 $dst  = "$root\src\ALVR-v20.14.1\alvr\host_harness"
 New-Item -ItemType Directory -Force "$dst\src" | Out-Null
 Copy-Item "$root\_tmp\host\Cargo.toml" "$dst\Cargo.toml" -Force

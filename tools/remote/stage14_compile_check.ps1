@@ -1,6 +1,6 @@
 # Syntax-checks the encoder sources against the vendored NVENC header and shows the compiler's own messages
 # (the cc crate hides them).
-$root = "$env:USERPROFILE\openxr"
+$root = if ($env:VISIONALVR_ROOT) { $env:VISIONALVR_ROOT } else { "$env:USERPROFILE\openxr" }
 $n = "$root\nvenc"; $u = "$n\upstream"
 $out = (Get-ChildItem "$root\src\ALVR-v20.14.1\target\release\build\alvr_host-*\out\VideoEncoderNVENC_split.cpp" | Sort-Object LastWriteTime | Select-Object -Last 1).DirectoryName
 $vcvars = 'C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Auxiliary\Build\vcvars64.bat'

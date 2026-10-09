@@ -2,7 +2,7 @@
 # alvr_host.exe, the OpenXR runtime (VDXR + OVRShim), the two GUIs, the register scripts, config\session.default.json,
 # bench\littlest_tokyo.vab (the benchmark scene).
 $ErrorActionPreference = 'Continue'
-$root = "$env:USERPROFILE\openxr"
+$root = if ($env:VISIONALVR_ROOT) { $env:VISIONALVR_ROOT } else { "$env:USERPROFILE\openxr" }
 $version = '0.1-alpha'
 $pkg = "$root\out\dist\VisionALVR"   # a folder no earlier layout used (out\visionalvr = the old installer package)
 New-Item -ItemType Directory -Force $pkg, "$pkg\config" | Out-Null

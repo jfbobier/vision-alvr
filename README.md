@@ -18,9 +18,14 @@ Stream PC OpenXR games to **Apple Vision Pro** with the stock **ALVR** visionOS 
 
 **Target, and only target:** the **Windows** streamer on an **NVIDIA GeForce RTX 40 series or newer** GPU, with the
 **ALVR app (20.14.x) on Apple Vision Pro**.
-The ALVR protocol is device agnostic, so other ALVR clients (Quest, Pico, ...) may well connect, but they are untested and
-not supported: encoder settings, defaults and the idle chroma-key frame are tuned for the Vision Pro. Issues and pull requests
-for other headsets or GPU vendors will be closed; please use [ALVR](https://github.com/alvr-org/ALVR) itself for those.
+
+This is a **personal project**. It targets NVIDIA because that is what I run, and the Vision Pro because that is my headset.
+It is not affiliated with or supported by NVIDIA, Apple or the ALVR project.
+- **Other headsets**: the ALVR protocol is device agnostic, so other ALVR clients (Quest, Pico, ...) may well connect, but they
+  are untested and not supported (encoder settings, defaults and the idle chroma-key frame are tuned for the Vision Pro).
+- **AMD / Intel GPUs**: not supported and not planned. The encode path is NVENC only; you are welcome to fork and adapt it.
+- Issues and pull requests for other headsets or GPU vendors will be closed. [ALVR](https://github.com/alvr-org/ALVR) itself
+  supports them.
 
 VisionALVR replaces the SteamVR + ALVR server pair on the PC with one lean streamer. It speaks the ALVR 20.14.1 protocol
 unchanged, so the ALVR app on the headset sees an ordinary ALVR server. In between, it does less work:
@@ -56,11 +61,19 @@ OpenXR game
 Download the release zip, unzip it anywhere, run `register_openxr_runtime.bat` once, then `configure.exe` (pair the headset,
 benchmark, settings) and `VisionALVR.exe` (keep it open while you play). Details, settings and logs: [docs/INSTALL.md](docs/INSTALL.md).
 
-## Build and test (contributors)
-Everything builds and runs on a Windows "builder" PC with an NVIDIA GPU, driven over SSH from a Linux shell (WSL works, also
-on the builder itself). One command sets up the pinned sources and builds everything; an automated harness runs end-to-end
-scenarios with a headless mock ALVR client, so most changes can be tested without a headset.
-See [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md) and [CONTRIBUTING.md](CONTRIBUTING.md).
+## Build from source (contributors)
+VisionALVR builds **on Windows only** (MSVC, the Windows SDK and NVENC; cross-compiling from Linux is not supported). With the
+prerequisites installed ([docs/DEVELOPMENT.md](docs/DEVELOPMENT.md): Git, Rust, CMake, LLVM, NuGet, Visual Studio 2022 with C++,
+all available through `winget`, plus an NVIDIA driver):
+```powershell
+git clone https://github.com/jfbobier/vision-alvr.git
+cd vision-alvr
+powershell -ExecutionPolicy Bypass -File build.ps1
+```
+The first run fetches ALVR v20.14.1 and VirtualDesktop-OpenXR at pinned commits and builds them (allow 30-60 minutes); the
+result is the same portable folder and zip as the release, in `out\dist\`. An automated test harness (end-to-end scenarios with
+a headless mock ALVR client, no headset needed) is described in [harness/README.md](harness/README.md).
+See also [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ## Repository layout
 | Path | What |

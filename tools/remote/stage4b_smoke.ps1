@@ -1,5 +1,5 @@
 $ErrorActionPreference = 'Continue'
-$root = "$env:USERPROFILE\openxr"
+$root = if ($env:VISIONALVR_ROOT) { $env:VISIONALVR_ROOT } else { "$env:USERPROFILE\openxr" }
 $rt   = "$root\out\vdxr-null"
 New-Item -ItemType Directory -Force $rt | Out-Null
 Copy-Item "$root\src\VDXR\bin\x64\Release\virtualdesktop-openxr.dll"  $rt -Force

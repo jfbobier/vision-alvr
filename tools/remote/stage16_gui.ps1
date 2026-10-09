@@ -1,7 +1,7 @@
 # Builds VisionALVR.exe and configure.exe (C# WinForms, .NET Framework 4.8 = part of Windows) with Visual Studio's Roslyn compiler
 # against the framework's own assemblies (no SDK needed). Sources: _tmp\gui (uploaded by `run.py build gui`). Output: out\gui.
 $ErrorActionPreference = 'Continue'
-$root = "$env:USERPROFILE\openxr"
+$root = if ($env:VISIONALVR_ROOT) { $env:VISIONALVR_ROOT } else { "$env:USERPROFILE\openxr" }
 $src = "$root\_tmp\gui"
 $out = "$root\out\gui"
 $csc = 'C:\Program Files\Microsoft Visual Studio\2022\Community\MSBuild\Current\Bin\Roslyn\csc.exe'
