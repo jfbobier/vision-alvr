@@ -1,0 +1,24 @@
+# --- generated / build output
+/build/
+/out/
+/dist/
+/runs/
+target/
+*.pdb
+*.obj
+
+# --- harness artifacts (results are large and contain local paths)
+/harness/results/
+/harness/cache/
+
+# --- local, personal or machine-specific
+/logs/
+/private/
+/external/
+/tools/builder.local
+/.claude/
+*:sec.endpointdlp
+.vscode/
+.idea/
+*.swp
+__pycache__/

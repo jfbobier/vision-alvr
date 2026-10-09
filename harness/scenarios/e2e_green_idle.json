@@ -1,0 +1,87 @@
+{
+  "description": "No OpenXR app: the host must stream pure green (the headset chroma-keys it) from the moment the client connects",
+  "topology": {
+    "host": "builder",
+    "client": "builder",
+    "client_bind_ip": "127.0.0.2",
+    "host_launch": "interactive"
+  },
+  "session_overrides": {
+    "session_settings.video.foveated_encoding.enabled": false,
+    "openvr_config.enable_foveated_encoding": false,
+    "openvr_config.eye_resolution_width": 1760,
+    "openvr_config.eye_resolution_height": 1600,
+    "openvr_config.target_eye_resolution_width": 1760,
+    "openvr_config.target_eye_resolution_height": 1600,
+    "session_settings.connection.client_recv_buffer_bytes": {
+      "variant": "Custom",
+      "Custom": 16777216
+    },
+    "session_settings.connection.server_send_buffer_bytes": {
+      "variant": "Custom",
+      "Custom": 16777216
+    },
+    "session_settings.video.transcoding_view_resolution": {
+      "Scale": 1.0,
+      "Absolute": {
+        "width": 1760,
+        "height": {
+          "set": true,
+          "content": 1600
+        }
+      },
+      "variant": "Absolute"
+    },
+    "session_settings.video.emulated_headset_view_resolution": {
+      "Scale": 1.0,
+      "Absolute": {
+        "width": 1760,
+        "height": {
+          "set": true,
+          "content": 1600
+        }
+      },
+      "variant": "Absolute"
+    }
+  },
+  "host": {
+    "shim": true,
+    "fps": 90,
+    "seconds": 12,
+    "connect_timeout": 45,
+    "gpu_keepalive": 90
+  },
+  "client": {
+    "seconds": 10,
+    "connect_timeout": 45
+  },
+  "client_env": {
+    "RUST_LOG": "warn"
+  },
+  "timeout_s": 120,
+  "checks": {
+    "client_min_frames": 200,
+    "timestamps_monotonic": true,
+    "max_duplicate_timestamps": 400,
+    "codec": "Hevc",
+    "stream": {
+      "codec_name": "hevc",
+      "profile": "Main 10",
+      "pix_fmt": "yuv420p10le",
+      "width": 3520,
+      "height": 1600,
+      "color_range": "pc"
+    },
+    "decode": true,
+    "decode_frame_slack": 5,
+    "frame_classes": {
+      "expect": [
+        "G"
+      ],
+      "min_len": [
+        200
+      ],
+      "max_stray": 2
+    }
+  }
+}

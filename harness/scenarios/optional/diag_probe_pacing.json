@@ -1,0 +1,73 @@
+{
+  "description": "DIAG: long probe run for vsync/pacing counters in the shim log",
+  "topology": {
+    "host": "builder",
+    "client": "builder",
+    "client_bind_ip": "127.0.0.2",
+    "host_launch": "interactive"
+  },
+  "session_overrides": {
+    "session_settings.video.foveated_encoding.enabled": false,
+    "openvr_config.enable_foveated_encoding": false,
+    "openvr_config.eye_resolution_width": 1760,
+    "openvr_config.eye_resolution_height": 1600,
+    "openvr_config.target_eye_resolution_width": 1760,
+    "openvr_config.target_eye_resolution_height": 1600,
+    "session_settings.connection.client_recv_buffer_bytes": {
+      "variant": "Custom",
+      "Custom": 16777216
+    },
+    "session_settings.connection.server_send_buffer_bytes": {
+      "variant": "Custom",
+      "Custom": 16777216
+    },
+    "session_settings.video.transcoding_view_resolution": {
+      "Scale": 1.0,
+      "Absolute": {
+        "width": 1760,
+        "height": {
+          "set": true,
+          "content": 1600
+        }
+      },
+      "variant": "Absolute"
+    },
+    "session_settings.video.emulated_headset_view_resolution": {
+      "Scale": 1.0,
+      "Absolute": {
+        "width": 1760,
+        "height": {
+          "set": true,
+          "content": 1600
+        }
+      },
+      "variant": "Absolute"
+    }
+  },
+  "host": {
+    "shim": true,
+    "fps": 90,
+    "seconds": 50,
+    "connect_timeout": 45,
+    "gpu_keepalive": 90,
+    "exit_after_frames": 1900
+  },
+  "client": {
+    "seconds": 55,
+    "connect_timeout": 45,
+    "yaw_amp": 0.5,
+    "yaw_hz": 0.25
+  },
+  "client_env": {
+    "RUST_LOG": "warn"
+  },
+  "app": {
+    "frames": 1900,
+    "timeout_s": 60
+  },
+  "gpu_sample": true,
+  "timeout_s": 200,
+  "checks": {
+    "host_min_frames": 100
+  }
+}

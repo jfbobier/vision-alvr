@@ -1,0 +1,72 @@
+{
+  "description": "FULL-FRAME SPLIT ENCODE (--encode-profile full-split): the user's session with ALVR foveation turned off by the host, no QP map, NVENC split-frame forced to 3 strips: the whole 7104x3200 frame is encoded. On the 1-engine laptop the split degrades to 1 strip and the encode is ~30 ms (no pacing checks); on the 5090 run it and look for slices_per_packet ~3 and the encode time",
+  "topology": {
+    "host": "builder",
+    "client": "builder",
+    "client_bind_ip": "127.0.0.2",
+    "host_launch": "interactive"
+  },
+  "session_overrides": {},
+  "host": {
+    "shim": true,
+    "fps": 90,
+    "seconds": 60,
+    "connect_timeout": 45,
+    "gpu_keepalive": 90,
+    "exit_after_frames": 420,
+    "encode_profile": "full-split"
+  },
+  "client": {
+    "seconds": 55,
+    "connect_timeout": 45,
+    "yaw_amp": 0.5,
+    "yaw_hz": 0.25
+  },
+  "client_env": {
+    "RUST_LOG": "warn"
+  },
+  "app": {
+    "frames": 420,
+    "timeout_s": 60
+  },
+  "gpu_sample": true,
+  "timeout_s": 200,
+  "checks": {
+    "host_min_frames": 100,
+    "client_min_frames": 100,
+    "timestamps_monotonic": true,
+    "max_duplicate_timestamps": 400,
+    "min_delivery_ratio": 0.7,
+    "codec": "Hevc",
+    "stream": {
+      "codec_name": "hevc",
+      "profile": "Main 10",
+      "pix_fmt": "yuv420p10le",
+      "color_range": "pc",
+      "width": 7104,
+      "height": 3200
+    },
+    "decode": true,
+    "decode_frame_slack": 60,
+    "counter_block_px": 64,
+    "app_min_frames": 300,
+    "pose_roundtrip_max_rad": 0.06,
+    "min_yaw_range_rad": 0.3,
+    "refresh_hz": 90,
+    "max_pipeline_latency_ms": 150,
+    "negotiated": {
+      "view_resolution": [
+        3552,
+        3200
+      ],
+      "use_full_range": true,
+      "enable_foveated_encoding": false
+    },
+    "counter_readback": true,
+    "gray_patch": [
+      176,
+      200
+    ],
+    "foveation": false
+  }
+}

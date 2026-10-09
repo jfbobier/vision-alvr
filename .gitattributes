@@ -1,0 +1,14 @@
+* text=auto
+# Windows scripts keep CRLF (cmd.exe needs it for .bat/.cmd; PowerShell is happier with it)
+*.bat  text eol=crlf
+*.cmd  text eol=crlf
+*.ps1  text eol=crlf
+# Unix scripts and patches keep LF
+*.sh    text eol=lf
+*.patch text eol=lf
+# binaries
+*.png  binary
+*.ico  binary
+*.cso  binary
+*.vab  binary
+*.hevc binary

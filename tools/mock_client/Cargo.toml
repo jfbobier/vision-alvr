@@ -1,0 +1,18 @@
+[package]
+name = "alvr_client_headless"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+
+# Lives in tools/mock_client in the harness repo; copied into <ALVR>/alvr/client_headless on the builder
+# (the ALVR workspace globs alvr/*), see tools/remote/stage7_mockclient.ps1.
+[dependencies]
+alvr_common.workspace = true
+alvr_client_core.workspace = true
+alvr_packets.workspace = true
+alvr_session.workspace = true
+
+env_logger = "0.11"
+serde_json = "1"

@@ -1,0 +1,63 @@
+--- a/alvr/sockets/src/backend/udp.rs	2026-10-07 16:39:14.821627485 +0200
++++ b/alvr/sockets/src/backend/udp.rs	2026-10-07 16:39:14.863555806 +0200
+@@ -3,11 +3,11 @@
+ use super::{SocketReader, SocketWriter};
+ use alvr_common::{anyhow::Result, ConResult, HandleTryAgain};
+ use alvr_session::{DscpTos, SocketBufferSize};
+-use socket2::{MaybeUninitSlice, Socket};
++use socket2::{Domain, MaybeUninitSlice, Socket, Type};
+ use std::{
+     ffi::c_int,
+     mem::MaybeUninit,
+-    net::{IpAddr, UdpSocket},
++    net::{IpAddr, SocketAddr, UdpSocket},
+     ptr,
+     time::Duration,
+ };
+@@ -20,7 +20,16 @@
+     send_buffer_bytes: SocketBufferSize,
+     recv_buffer_bytes: SocketBufferSize,
+ ) -> Result<UdpSocket> {
+-    let socket = UdpSocket::bind((LOCAL_IP, port))?.into();
++    // Harness only: with ALVR_BIND_IP set, bind that address with SO_REUSEADDR so a mock client can share a
++    // machine with the streamer (which binds 0.0.0.0:port). Unset in normal operation.
++    let socket: Socket = if let Ok(ip) = std::env::var("ALVR_BIND_IP") {
++        let s = Socket::new(Domain::IPV4, Type::DGRAM, None)?;
++        s.set_reuse_address(true)?;
++        s.bind(&SocketAddr::new(ip.parse()?, port).into())?;
++        s
++    } else {
++        UdpSocket::bind((LOCAL_IP, port))?.into()
++    };
+ 
+     crate::set_socket_buffers(&socket, send_buffer_bytes, recv_buffer_bytes).ok();
+ 
+--- a/alvr/client_core/src/sockets.rs	2026-10-07 16:39:14.826024595 +0200
++++ b/alvr/client_core/src/sockets.rs	2026-10-07 16:39:14.863605659 +0200
+@@ -9,7 +9,15 @@
+ 
+ impl AnnouncerSocket {
+     pub fn new(hostname: &str) -> Result<Self> {
+-        let socket = UdpSocket::bind((LOCAL_IP, CONTROL_PORT))?;
++        // Harness only: see alvr_sockets udp::bind (ALVR_BIND_IP).
++        let socket = if let Ok(ip) = std::env::var("ALVR_BIND_IP") {
++            let s = socket2::Socket::new(socket2::Domain::IPV4, socket2::Type::DGRAM, None)?;
++            s.set_reuse_address(true)?;
++            s.bind(&std::net::SocketAddr::new(ip.parse()?, CONTROL_PORT).into())?;
++            UdpSocket::from(s)
++        } else {
++            UdpSocket::bind((LOCAL_IP, CONTROL_PORT))?
++        };
+         socket.set_broadcast(true)?;
+ 
+         let mut packet = [0; 56];
+--- a/alvr/client_core/Cargo.toml	2026-10-07 16:39:24.431726147 +0200
++++ b/alvr/client_core/Cargo.toml	2026-10-07 16:39:24.436736093 +0200
+@@ -27,6 +27,7 @@
+ rand = "0.9"
+ serde = "1"
+ serde_json = "1"
++socket2 = "0.5"
+ 
+ [target.'cfg(target_os = "android")'.dependencies]
+ android_logger = "0.14"

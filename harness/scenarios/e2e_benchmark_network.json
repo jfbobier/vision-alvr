@@ -1,0 +1,36 @@
+{
+  "description": "NETWORK BENCHMARK plumbing: alvr_host --benchmark-network streams random frames at stepped bitrates to the mock client and reports ALVR's client statistics per step plus a recommendation (loopback = TCP on the builder: the numbers mean nothing, only the mechanism is checked)",
+  "topology": {
+    "host": "builder",
+    "client": "builder",
+    "client_bind_ip": "127.0.0.2",
+    "host_launch": "interactive"
+  },
+  "session_overrides": {},
+  "host": {
+    "benchmark_network": "100,200",
+    "bench_step_s": 4,
+    "seconds": 120,
+    "connect_timeout": 45,
+    "live": true
+  },
+  "client": {
+    "seconds": 40,
+    "connect_timeout": 45
+  },
+  "client_env": {
+    "RUST_LOG": "warn"
+  },
+  "timeout_s": 150,
+  "checks": {
+    "client_min_frames": 50,
+    "host_events": [
+      "bench_step_start",
+      "bench_step",
+      "bench_result"
+    ],
+    "max_duplicate_timestamps": 100000,
+    "bench_tracks_target": true
+  },
+  "gpu_sample": true
+}

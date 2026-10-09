@@ -1,0 +1,83 @@
+{
+  "description": "DIAG: e2e_avp_late_views with the encoder device at GPU thread priority 7 (the 90% GPU keep-alive load competes with the foveation pass and the encoder copy)",
+  "topology": {
+    "host": "builder",
+    "client": "builder",
+    "client_bind_ip": "127.0.0.2",
+    "host_launch": "interactive"
+  },
+  "session_overrides": {},
+  "host": {
+    "shim": true,
+    "fps": 90,
+    "seconds": 60,
+    "connect_timeout": 45,
+    "gpu_keepalive": 90,
+    "exit_after_frames": 420,
+    "gpu_priority": 7
+  },
+  "client": {
+    "seconds": 55,
+    "connect_timeout": 45,
+    "yaw_amp": 0.5,
+    "yaw_hz": 0.25,
+    "views_after_first_frame": true
+  },
+  "client_env": {
+    "RUST_LOG": "warn"
+  },
+  "app": {
+    "frames": 420,
+    "timeout_s": 60
+  },
+  "gpu_sample": true,
+  "timeout_s": 200,
+  "checks": {
+    "host_min_frames": 250,
+    "client_min_frames": 200,
+    "timestamps_monotonic": true,
+    "max_duplicate_timestamps": 400,
+    "min_delivery_ratio": 0.7,
+    "codec": "Hevc",
+    "stream": {
+      "codec_name": "hevc",
+      "profile": "Main 10",
+      "pix_fmt": "yuv420p10le",
+      "color_range": "pc"
+    },
+    "decode": true,
+    "decode_frame_slack": 60,
+    "counter_readback": true,
+    "counter_block_px": 64,
+    "gray_patch": [
+      176,
+      200
+    ],
+    "app_min_frames": 300,
+    "pose_roundtrip_max_rad": 0.06,
+    "min_yaw_range_rad": 0.3,
+    "refresh_hz": 90,
+    "max_pipeline_latency_ms": 150,
+    "negotiated": {
+      "view_resolution": [
+        3552,
+        3200
+      ],
+      "use_full_range": true,
+      "enable_foveated_encoding": true
+    },
+    "foveation": true,
+    "max_encode_ms_p95": 16,
+    "pacing": {
+      "warmup_frames": 30,
+      "client_p99_ms": 20,
+      "max_late_frac": 0.01,
+      "vsync_p99_ms": 12.5,
+      "vsync_max_ms": 40,
+      "intake_p99_ms": 16
+    },
+    "audio_min_device_events": 1,
+    "shim_ts_matched_min_frac": 0.95,
+    "shim_submit_mode": "async"
+  }
+}

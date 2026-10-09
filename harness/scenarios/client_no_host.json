@@ -1,0 +1,9 @@
+{
+  "description": "Negative control: mock client alone must exit 'never connected' (proves the harness can detect failure)",
+  "source": "out/nvenc/hevc10_250_fix10.hevc",
+  "host": null,
+  "client": { "seconds": 5, "connect_timeout": 6 },
+  "timeout_s": 60,
+  "expect": { "client_connected": false },
+  "checks": {}
+}

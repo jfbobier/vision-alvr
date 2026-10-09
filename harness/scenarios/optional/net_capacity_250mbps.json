@@ -1,0 +1,44 @@
+{
+  "description": "Link-capacity probe: 250 Mbps replay across the laptop->builder network. Only asserts the protocol path works; throughput numbers are recorded, not judged (this Wi-Fi path cannot carry 250 Mbps)",
+  "source": "out/nvenc/hevc10_250_fix10.hevc",
+  "host": {
+    "fps": 90,
+    "seconds": 12,
+    "connect_timeout": 45,
+    "min_frames": 600
+  },
+  "client": {
+    "seconds": 10,
+    "connect_timeout": 45,
+    "min_frames": 500,
+    "yaw_amp": 0.5,
+    "yaw_hz": 0.25
+  },
+  "timeout_s": 150,
+  "checks": {
+    "client_min_frames": 1,
+    "timestamps_monotonic": true,
+    "max_duplicate_timestamps": 100000,
+    "codec": "Hevc",
+    "negotiated": {
+      "view_resolution": [
+        3552,
+        3200
+      ],
+      "use_full_range": true,
+      "enable_foveated_encoding": true
+    },
+    "stream": {
+      "codec_name": "hevc",
+      "profile": "Main 10",
+      "pix_fmt": "yuv420p10le",
+      "width": 7104,
+      "height": 3200,
+      "color_range": "pc"
+    }
+  },
+  "topology": {
+    "host": "wsl",
+    "client": "builder"
+  }
+}

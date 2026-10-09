@@ -1,0 +1,56 @@
+{
+  "description": "Host (WSL, Windows exe via interop) replays a ~30 Mbps NVENC 10-bit HEVC stream over the real ALVR protocol to the headless mock client on the builder",
+  "source": "out/nvenc/hevc10_30_fix10.hevc",
+  "host": {
+    "fps": 90,
+    "seconds": 12,
+    "connect_timeout": 45,
+    "min_frames": 600
+  },
+  "client": {
+    "seconds": 10,
+    "connect_timeout": 45,
+    "min_frames": 500,
+    "yaw_amp": 0.5,
+    "yaw_hz": 0.25
+  },
+  "timeout_s": 150,
+  "checks": {
+    "host_min_frames": 600,
+    "client_min_frames": 500,
+    "timestamps_monotonic": true,
+    "min_pose_match_ratio": 0.99,
+    "max_latency_p95_ms": 100,
+    "fps": [
+      80,
+      100
+    ],
+    "codec": "Hevc",
+    "negotiated": {
+      "view_resolution": [
+        3552,
+        3200
+      ],
+      "use_full_range": true,
+      "enable_foveated_encoding": true
+    },
+    "stream": {
+      "codec_name": "hevc",
+      "profile": "Main 10",
+      "pix_fmt": "yuv420p10le",
+      "width": 7104,
+      "height": 3200,
+      "color_range": "pc"
+    },
+    "decode": true,
+    "decode_frame_slack": 10,
+    "content_integrity": true,
+    "max_duplicate_timestamps": 16,
+    "max_unknown_frame_ratio": 0.05,
+    "min_delivery_ratio": 0.6
+  },
+  "topology": {
+    "host": "wsl",
+    "client": "builder"
+  }
+}

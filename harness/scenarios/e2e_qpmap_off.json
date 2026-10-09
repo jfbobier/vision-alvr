@@ -1,0 +1,83 @@
+{
+ "description": "Control for e2e_qpmap_on: same content and settings with the QP map OFF; decoded detail should be flat across the frame (25 Mbps so rate control is actually constrained; the content itself has ~1.3x more detail in the center region, so the control reads ~1.35 and the map-on run ~1.8)",
+ "topology": {
+  "host": "builder",
+  "client": "builder",
+  "client_bind_ip": "127.0.0.2"
+ },
+ "session_overrides": {
+  "session_settings.video.foveated_encoding.enabled": false,
+  "openvr_config.enable_foveated_encoding": false,
+  "session_settings.connection.client_recv_buffer_bytes": {
+   "variant": "Custom",
+   "Custom": 16777216
+  },
+  "session_settings.connection.server_send_buffer_bytes": {
+   "variant": "Custom",
+   "Custom": 16777216
+  },
+  "session_settings.video.bitrate.mode.ConstantMbps": 25
+ },
+ "host": {
+  "live": true,
+  "fps": 90,
+  "seconds": 12,
+  "connect_timeout": 45,
+  "min_frames": 600,
+  "width": 3552,
+  "height": 1600,
+  "gpu_keepalive": 90,
+  "qp_map": "off",
+  "noise": true,
+  "dump_qpmap": true
+ },
+ "client": {
+  "seconds": 10,
+  "connect_timeout": 45,
+  "min_frames": 200
+ },
+ "timeout_s": 150,
+ "checks": {
+  "host_min_frames": 600,
+  "client_min_frames": 400,
+  "timestamps_monotonic": true,
+  "max_duplicate_timestamps": 200,
+  "min_delivery_ratio": 0.8,
+  "min_pose_match_ratio": 0.99,
+  "codec": "Hevc",
+  "negotiated": {
+   "view_resolution": [
+    3552,
+    3200
+   ],
+   "use_full_range": true,
+   "enable_foveated_encoding": false
+  },
+  "stream": {
+   "codec_name": "hevc",
+   "profile": "Main 10",
+   "pix_fmt": "yuv420p10le",
+   "width": 3552,
+   "height": 1600,
+   "color_range": "pc"
+  },
+  "decode": true,
+  "decode_frame_slack": 20,
+  "counter_readback": true,
+  "max_encode_ms_p95": 16,
+  "qpmap": {
+   "on": false,
+   "center": -3,
+   "edge": 6,
+   "transition": 1.0,
+   "effect": {
+    "frame": 60
+   },
+   "max_detail_ratio": 1.5
+  }
+ },
+ "client_env": {
+  "RUST_LOG": "info"
+ },
+ "gpu_sample": true
+}

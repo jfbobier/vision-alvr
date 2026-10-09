@@ -1,0 +1,23 @@
+[package]
+name = "alvr_host"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+
+# Lives in tools/host in the harness repo; copied into <ALVR>/alvr/host_harness on the builder
+# (the ALVR workspace globs alvr/*), see tools/remote/stage8_host.ps1.
+[dependencies]
+alvr_audio.workspace = true # device ids for the game-audio log (server_core does the capture itself)
+alvr_common.workspace = true
+alvr_events.workspace = true # ALVR's client statistics events (captured by the host's logger)
+alvr_filesystem.workspace = true
+alvr_packets.workspace = true
+alvr_server_core.workspace = true
+alvr_session.workspace = true
+
+serde_json = "1"
+
+[build-dependencies]
+cc = "1"

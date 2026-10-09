@@ -1,0 +1,70 @@
+{
+  "_comment": "Resolved with git rev-parse on 2026-10-07. Entries with full_hash=null were only recorded as short hashes in docs and are NOT present locally; resolve before relying on them.",
+  "builder_sources": {
+    "ALVR-v20.14.1": {
+      "tag": "v20.14.1",
+      "full_hash": "a9f6542fa507a841f40ab4f3fcb531427cd02550",
+      "where": "builder src/ALVR-v20.14.1 and external/ALVR-v20.14.1",
+      "submodules": {
+        "openvr": "4c85abcb7f7f1f02adaf3812018c99fc593bc341"
+      }
+    },
+    "VDXR": {
+      "full_hash": "1a83fec8b5c565b14b06ffa8e1eb7e4768057573",
+      "where": "builder src/VDXR",
+      "submodules": {
+        "external/FidelityFX-CAS": "9fabcc9a2c45f958aff55ddfda337e74ef894b7f",
+        "external/FidelityFX-FSR": "a21ffb8f6c13233ba336352bdff293894c706575",
+        "external/LibOVR": "3621783c2540db1ad0f68f85d9d30fafa3f7e8b7",
+        "external/OpenXR-CTS": "bebc21909c44c32a9acd831bcbd65f31648b660d",
+        "external/OpenXR-MixedReality": "6ce0e75e79300f17fa9e86b4c9cb4cdaeaa29cc2",
+        "external/OpenXR-SDK": "57af7fc61f9f2d492580cb28aab6d0ea59d8d417",
+        "external/OpenXR-SDK-Source": "c610211f38f4e1e4ac811ced6135e144eedc7cf2",
+        "external/Vulkan-SDK": "cb7df06d3f02fa043a441641856310b798522583",
+        "external/cJSON": "c859b25da02955fef659d658b8f324b5cde87be3",
+        "external/fmt": "130cf54cbc77abf0c8200a1206638cb70c9e26f1",
+        "external/openvr": "f51d87ecf8f7903e859b0aa4d617ff1e5f33db5a"
+      }
+    }
+  },
+  "recon_clones": {
+    "ALVR-master": {
+      "full_hash": "ee6d3b1669e4d8526fa46dbf29567e1a6d604459"
+    },
+    "alvr-visionos": {
+      "full_hash": "fb2576a2a4df23a20647e327acc4d8f785da0d77"
+    },
+    "monado": {
+      "full_hash": "7b5894b6035dbe74ed89796f44342f055f6b8c8f"
+    },
+    "WiVRn": {
+      "short_hash": "640e1a5",
+      "full_hash": null,
+      "note": "not present in the recon clones; recon only"
+    }
+  },
+  "open_items": {
+    "avp_client_alvr_commit": {
+      "short_hash": "e3fd448",
+      "full_hash": null,
+      "note": "from CODE_INVENTORY.md; not in the local ALVR-master clone (ee6d3b1), protocol compatibility unverified"
+    }
+  },
+  "toolchain_builder": {
+    "rustc": "1.99.0",
+    "cmake": "4.4.4",
+    "llvm": "23.1.3",
+    "nuget": "7.9.0",
+    "msvc": "14.44",
+    "windows_sdk": "26100",
+    "nvidia_driver": "617.14"
+  },
+  "vendored": {
+    "nv-codec-headers": {
+      "tag": "n12.2.72.0",
+      "url": "https://github.com/FFmpeg/nv-codec-headers (include/ffnvcodec/nvEncodeAPI.h, MIT, NVIDIA SDK 12.2 header)",
+      "sha256": "4677a397e3ec5300a6b38bf49cba42bb63a922ab26f24bc63a05ed08857cba16",
+      "used_as": "nvenc/shim122/alvr_server/nvEncodeAPI.h (host build only; shadows ALVR's bundled SDK 12.0 header; needed for splitEncodeMode)"
+    }
+  }
+}

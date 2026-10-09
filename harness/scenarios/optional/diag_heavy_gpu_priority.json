@@ -1,0 +1,104 @@
+{
+  "description": "DIAG: heavy app (async submit) with the encoder device at GPU thread priority 7 (compare encode/ffr_wait with e2e_heavy_app_async)",
+  "topology": {
+    "host": "builder",
+    "client": "builder",
+    "client_bind_ip": "127.0.0.2",
+    "host_launch": "interactive"
+  },
+  "session_overrides": {
+    "session_settings.video.foveated_encoding.enabled": false,
+    "openvr_config.enable_foveated_encoding": false,
+    "openvr_config.eye_resolution_width": 1760,
+    "openvr_config.eye_resolution_height": 1600,
+    "openvr_config.target_eye_resolution_width": 1760,
+    "openvr_config.target_eye_resolution_height": 1600,
+    "session_settings.connection.client_recv_buffer_bytes": {
+      "variant": "Custom",
+      "Custom": 16777216
+    },
+    "session_settings.connection.server_send_buffer_bytes": {
+      "variant": "Custom",
+      "Custom": 16777216
+    },
+    "session_settings.video.transcoding_view_resolution": {
+      "Scale": 1.0,
+      "Absolute": {
+        "width": 1760,
+        "height": {
+          "set": true,
+          "content": 1600
+        }
+      },
+      "variant": "Absolute"
+    },
+    "session_settings.video.emulated_headset_view_resolution": {
+      "Scale": 1.0,
+      "Absolute": {
+        "width": 1760,
+        "height": {
+          "set": true,
+          "content": 1600
+        }
+      },
+      "variant": "Absolute"
+    }
+  },
+  "host": {
+    "shim": true,
+    "fps": 90,
+    "seconds": 60,
+    "connect_timeout": 45,
+    "exit_after_frames": 420,
+    "gpu_priority": 7
+  },
+  "client": {
+    "seconds": 55,
+    "connect_timeout": 45,
+    "yaw_amp": 0.5,
+    "yaw_hz": 0.25
+  },
+  "client_env": {
+    "RUST_LOG": "warn"
+  },
+  "app": {
+    "frames": 420,
+    "timeout_s": 60,
+    "env": {
+      "XR_PROBE_CPU_MS": "6",
+      "XR_PROBE_GPU_COPIES": "28"
+    }
+  },
+  "gpu_sample": true,
+  "timeout_s": 200,
+  "checks": {
+    "host_min_frames": 150,
+    "client_min_frames": 120,
+    "timestamps_monotonic": true,
+    "max_duplicate_timestamps": 400,
+    "min_delivery_ratio": 0.7,
+    "codec": "Hevc",
+    "stream": {
+      "codec_name": "hevc",
+      "profile": "Main 10",
+      "pix_fmt": "yuv420p10le",
+      "width": 3520,
+      "height": 1600,
+      "color_range": "pc"
+    },
+    "decode": true,
+    "decode_frame_slack": 40,
+    "counter_readback": true,
+    "counter_block_px": 64,
+    "gray_patch": [
+      176,
+      200
+    ],
+    "app_min_frames": 300,
+    "pose_roundtrip_max_rad": 0.06,
+    "min_yaw_range_rad": 0.3,
+    "refresh_hz": 90,
+    "max_pipeline_latency_ms": 150,
+    "shim_submit_mode": "async"
+  }
+}

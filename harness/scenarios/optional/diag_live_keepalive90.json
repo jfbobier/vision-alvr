@@ -1,0 +1,68 @@
+{
+  "description": "(diagnostic) live reduced-res with GPU sampling and a 50% keep-alive GPU load",
+  "topology": {
+    "host": "builder",
+    "client": "builder",
+    "client_bind_ip": "127.0.0.2"
+  },
+  "session_overrides": {
+    "session_settings.video.foveated_encoding.enabled": false,
+    "openvr_config.enable_foveated_encoding": false,
+    "session_settings.connection.client_recv_buffer_bytes": {
+      "variant": "Custom",
+      "Custom": 16777216
+    },
+    "session_settings.connection.server_send_buffer_bytes": {
+      "variant": "Custom",
+      "Custom": 16777216
+    }
+  },
+  "host": {
+    "live": true,
+    "fps": 90,
+    "seconds": 12,
+    "connect_timeout": 45,
+    "min_frames": 300,
+    "width": 3552,
+    "height": 1600,
+    "gpu_keepalive": 90
+  },
+  "client": {
+    "seconds": 10,
+    "connect_timeout": 45,
+    "min_frames": 200
+  },
+  "timeout_s": 150,
+  "checks": {
+    "host_min_frames": 300,
+    "client_min_frames": 200,
+    "timestamps_monotonic": true,
+    "max_duplicate_timestamps": 200,
+    "min_delivery_ratio": 0.8,
+    "min_pose_match_ratio": 0.99,
+    "codec": "Hevc",
+    "negotiated": {
+      "view_resolution": [
+        3552,
+        3200
+      ],
+      "use_full_range": true,
+      "enable_foveated_encoding": false
+    },
+    "stream": {
+      "codec_name": "hevc",
+      "profile": "Main 10",
+      "pix_fmt": "yuv420p10le",
+      "width": 3552,
+      "height": 1600,
+      "color_range": "pc"
+    },
+    "decode": true,
+    "decode_frame_slack": 2,
+    "counter_readback": true
+  },
+  "client_env": {
+    "RUST_LOG": "info"
+  },
+  "gpu_sample": true
+}
