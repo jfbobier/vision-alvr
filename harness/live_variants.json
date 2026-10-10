@@ -1,0 +1,14 @@
+[
+  {"name": "synthetic_regular", "game": "synthetic", "seconds": 60,
+   "settings": {}, "note": "host test pattern at 90 fps, no game: isolates headset + network (expect SteamVR-like client stats if the pipeline below the host is fine)"},
+  {"name": "slot_v6_deadspace", "game": "dead_space", "seconds": 60,
+   "settings": {"send_pacing": "slot"}, "session": {"max_prediction_ms": 0, "bitrate_mbps": 300}},
+  {"name": "slot_v6_match_deadspace", "game": "dead_space", "seconds": 60,
+   "settings": {"send_pacing": "slot", "stamp": "match"}, "note": "no rotation warp: tests the black-edge hypothesis under regular delivery"},
+  {"name": "asap_baseline_deadspace", "game": "dead_space", "seconds": 60,
+   "settings": {"send_pacing": "asap", "pacing": "grid", "stamp": "match", "gpu_sched_class": 2}, "note": "this morning's pipeline, for the delta"},
+  {"name": "slot_v6_boundary6_deadspace", "game": "dead_space", "seconds": 60,
+   "settings": {"send_pacing": "slot", "send_offset_auto": false, "slot_boundary_ms": 6}},
+  {"name": "slot_v6_freshwait8_deadspace", "game": "dead_space", "seconds": 60,
+   "settings": {"send_pacing": "slot", "fresh_wait_ms": 8}}
+]

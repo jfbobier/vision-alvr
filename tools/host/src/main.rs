@@ -62,6 +62,8 @@ struct Args {
     encode_lead_ms: f64,
     slot_boundary_ms: f64,
     gpu_sched_class: i64,
+    /// scripted controller input for unattended runs: (seconds after the game started, hand 0/1, click mask, trigger)
+    auto_input: Vec<(f64, usize, u32, f32)>,
     send_pacing_explicit: bool,
     /// 0: frames stamped with the sample the app rendered with; 1: newest sample + projection layers rotated to it; 2: 1 + the pose
     /// handed to the app is extrapolated to the expected stamp time
@@ -138,6 +140,7 @@ fn parse_args() -> Result<Args, String> {
         encode_lead_ms: 4.0,
         slot_boundary_ms: 10.0,
         gpu_sched_class: 5,
+        auto_input: vec![],
         send_pacing_explicit: false,
         stamp_mode: 2,
         stamp_explicit: false,
@@ -250,6 +253,30 @@ fn parse_args() -> Result<Args, String> {
             }
             "--pacing-guard-ms" => a.pacing_guard_ms = v()?.parse().map_err(|e| format!("{e}"))?,
             "--render-scale" => a.render_scale = v()?.parse().map_err(|e| format!("{e}"))?,
+            "--auto-input" => {
+                // "20:rA,26:rA,40:lT": at 20 s and 26 s after the game starts press A on the right controller, at 40 s the left
+                // trigger. Buttons: A/X primary, B/Y secondary, S thumbstick, M menu, H system, T trigger, G grip.
+                for item in v()?.split(',').filter(|x| !x.trim().is_empty()) {
+                    let (t, rest) = item.trim().split_once(':').ok_or_else(|| format!("--auto-input: expected s:hB, got {item}"))?;
+                    let t: f64 = t.parse().map_err(|e| format!("--auto-input time {t}: {e}"))?;
+                    let mut ch = rest.chars();
+                    let side = match ch.next() { Some('l') | Some('L') => 0, Some('r') | Some('R') => 1, _ => return Err(format!("--auto-input: hand l/r in {item}")) };
+                    let (mut mask, mut trigger) = (0u32, 0f32);
+                    for b in ch {
+                        match b.to_ascii_uppercase() {
+                            'A' | 'X' => mask |= 1,
+                            'B' | 'Y' => mask |= 2,
+                            'S' => mask |= 4,
+                            'M' => mask |= 8,
+                            'H' => mask |= 16,
+                            'T' => trigger = 1.0,
+                            'G' => {} // squeeze handled as trigger-like below
+                            o => return Err(format!("--auto-input: unknown button {o} in {item}")),
+                        }
+                    }
+                    a.auto_input.push((t, side, mask, trigger));
+                }
+            }
             "--qp-map" => {
                 a.qp_map = Some(match v()?.as_str() {
                     "on" | "1" => true,
@@ -1975,6 +2002,9 @@ fn main() {
         submitted0: u32,
     }
     let mut game: Option<GameRun> = None;
+    // scripted input (--auto-input): index of the next event to fire and the release instant of a pressed one
+    let mut auto_next = 0usize;
+    let mut auto_release: Option<(Instant, usize)> = None;
     let shim_submitted = |ipc: *mut std::ffi::c_void| -> u32 {
         let (mut m, mut a, mut b) = (0u32, 0u32, 0u32);
         if !ipc.is_null() {
@@ -2031,7 +2061,25 @@ fn main() {
                 logs::general("INFO", &format!("game started: {exe}"));
                 event(origin, "game_started", json!({ "exe": exe }));
                 game = Some(GameRun { exe, start: Instant::now(), frames0: shared.frames_sent.load(Ordering::Relaxed), submitted0: shim_submitted(ipc) });
-            } else if !alive && game.is_some() {
+                auto_next = 0;
+            }
+            if let Some(g) = &game {
+                // scripted controller input: press for 150 ms, then release (the headset's own input overwrites the state after)
+                if let Some((until, side)) = auto_release {
+                    if Instant::now() >= until {
+                        unsafe { nvh::nvh_ipc_publish_input(ipc, side as i32, 0, 0, 0.0, 0.0, 0.0, 0.0) };
+                        auto_release = None;
+                    }
+                }
+                if auto_release.is_none() && auto_next < args.auto_input.len() && g.start.elapsed().as_secs_f64() >= args.auto_input[auto_next].0 {
+                    let (t, side, mask, trigger) = args.auto_input[auto_next];
+                    unsafe { nvh::nvh_ipc_publish_input(ipc, side as i32, mask, mask, trigger, 0.0, 0.0, 0.0) };
+                    auto_release = Some((Instant::now() + Duration::from_millis(150), side));
+                    event(origin, "auto_input", json!({ "t": t, "hand": side, "clicks": mask, "trigger": trigger }));
+                    auto_next += 1;
+                }
+            }
+            if !alive && game.is_some() {
                 let g = game.take().unwrap();
                 let secs = g.start.elapsed().as_secs_f64();
                 let frames = shared.frames_sent.load(Ordering::Relaxed) - g.frames0;
