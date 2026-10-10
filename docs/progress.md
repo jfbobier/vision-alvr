@@ -254,3 +254,10 @@ Tokyo benchmark scene (room, animation) with the runtime's view poses: the scene
 `nvenc/hostlib/bench_scene.h`, shared. New checks: `display`, `pipeline`, `app_timing`. The OpenXR-Simulator project the user
 found is a runtime (a VDXR stand-in), not an app, so it cannot sit in our chain; its probe is a BetterVR replay with less than ours.
 All of it compile-checked from WSL (`tools/wsl/check_cpp.sh`, cargo check of the mock client), not yet run on the PC.
+
+2026-10-10 (night, main): **height calibration** (user playtest: Moss Book, Titan Isles put the action at the floor; the Vision Pro's
+floor estimate is unreliable, Quest-style floor calibration does not exist there). VisionALVR.exe gets a live knob "Height above
+floor, m" (default 1.30 = a seated adult, 0 = headset floor as is; `headset.height_m` in visionalvr.json, `--height-m`, stdin
+`height <m>`). The host adds a constant offset to the head's and hands' y so the head sits at that height when anchored (half a
+second after connect, and whenever the knob moves: re-anchored to the current pose); the headset's own vertical movement stays on
+top, games can still override. Logged as `height_calibrated` and in the general log. Compile-checked, not yet run.

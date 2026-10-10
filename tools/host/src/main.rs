@@ -79,6 +79,10 @@ struct Args {
     /// run only the headset discovery for this many seconds (headset_seen events), then exit
     discover: Option<f64>,
     gamma: Option<f32>,
+    /// headset height above the floor handed to games, metres (0 = the headset's own floor estimate). Games with the action
+    /// on the floor by default (Moss, Titan Isles) assume a standing user; the Vision Pro's floor estimate is unreliable, so
+    /// the launcher sets a plausible seated height (1.3 m) and the headset's own vertical movement is kept on top of it.
+    height_m: f32,
     bench_network: Option<Vec<u32>>,
     bench_step_s: f64,
     noise_block: i64,
@@ -143,6 +147,7 @@ fn parse_args() -> Result<Args, String> {
         system_check: false,
         discover: None,
         gamma: None,
+        height_m: 1.3,
         bench_network: None,
         bench_step_s: 8.0,
         noise_block: 16,
@@ -188,6 +193,7 @@ fn parse_args() -> Result<Args, String> {
             "--system-check" => a.system_check = true,
             "--discover" => a.discover = Some(v()?.parse().map_err(|e| format!("{e}"))?),
             "--gamma" => a.gamma = Some(v()?.parse().map_err(|e| format!("{e}"))?),
+            "--height-m" => a.height_m = v()?.parse().map_err(|e| format!("{e}"))?,
             "--benchmark-network" => {
                 a.bench_network = Some(v()?.split(',').map(|x| x.trim().parse::<u32>().map_err(|e| format!("--benchmark-network: {e}"))).collect::<Result<_, _>>()?);
                 a.live = true;
@@ -352,6 +358,9 @@ fn apply_settings(a: &mut Args, st: &vision::Settings) {
     }
     if a.gamma.is_none() {
         a.gamma = st.gamma;
+    }
+    if let Some(h) = st.height_m {
+        a.height_m = h;
     }
     if a.encode_profile == nvidia_profile::EncodeProfile::FullSplit {
         // whole frame, straight to the encoder engines: no QP map, 3 strips (explicit --qp-map / --split-encode still win)
@@ -1414,14 +1423,23 @@ fn main() {
     {
         let (ctx, shared) = (Arc::clone(&ctx), Arc::clone(&shared));
         let session_path = layout.session();
+        let mut height_target = args.height_m;
         thread::spawn(move || {
             let ipc = ipc_addr as *mut std::ffi::c_void;
             let mut hands = [HandInputState::default(); 2];
+            // Height calibration: a constant offset on the headset's y so that the head sits at `height_target` when anchored
+            // (at connect, after a short settle, and whenever the launcher sends a new height); the headset's own vertical movement
+            // stays on top. 0 = no offset (the headset's floor estimate as is).
+            let mut height_offset = 0f32;
+            let mut height_anchored = false;
+            let mut samples_since_connect = 0u32;
             let mut buttons_seen = 0usize;
             let mut invalid_views = 0usize;
             for ev in events {
                 match ev {
                     ServerCoreEvent::ClientConnected => {
+                        height_anchored = false;
+                        samples_since_connect = 0;
                         shared.connect_pending.store(true, Ordering::SeqCst);
                         shared.client_connected.store(true, Ordering::SeqCst);
                         shared.restart_from_idr.store(true, Ordering::SeqCst);
@@ -1454,19 +1472,36 @@ fn main() {
                             // server_core hands out angular velocity in the device's own frame (what OpenVR wants); OVR/OpenXR report
                             // it in tracking space (VDXR passes it to the app as a base-space velocity): rotate it back
                             let world_av = |m: &alvr_common::DeviceMotion| (m.pose.orientation * m.angular_velocity).to_array();
+                            samples_since_connect = samples_since_connect.saturating_add(1);
+                            let req = vision::HEIGHT_REQ.swap(0, Ordering::SeqCst);
+                            if req != 0 {
+                                let h = f32::from_bits(req);
+                                height_target = if h <= f32::MIN_POSITIVE { 0.0 } else { h };
+                                height_anchored = false;
+                            }
                             if let Some(m) = ctx.get_device_motion(*HEAD_ID, sample_timestamp) {
+                                if !height_anchored && samples_since_connect >= 45 {
+                                    // half a second of tracking after connect: the pose is real, anchor the height on it
+                                    height_offset = if height_target > 0.0 { height_target - m.pose.position.y } else { 0.0 };
+                                    height_anchored = true;
+                                    logs::general("INFO", &format!("height: headset at {:.2} m -> handed to games as {:.2} m (offset {:+.2})",
+                                        m.pose.position.y, m.pose.position.y + height_offset, height_offset));
+                                    event(origin, "height_calibrated", json!({ "target_m": height_target, "headset_y": m.pose.position.y, "offset_m": height_offset }));
+                                }
                                 // Head: pose only, zero velocity, exactly like ALVR's SteamVR driver (Hmd::OnPoseUpdated). The
                                 // visionOS client sends a finite-difference velocity of two ARKit poses (noisy); extrapolating
                                 // the head with it over ~25 ms made the view bob, and the headset reprojects against the
                                 // un-extrapolated pose anyway.
-                                let (q, p) = (m.pose.orientation.to_array(), m.pose.position.to_array());
+                                let (q, mut p) = (m.pose.orientation.to_array(), m.pose.position.to_array());
+                                p[1] += height_offset;
                                 let (lv, av) = ([0f32; 3], [0f32; 3]);
                                 unsafe { nvh::nvh_ipc_publish_head(ipc, sample_timestamp.as_nanos() as u64, q.as_ptr(), p.as_ptr(), lv.as_ptr(), av.as_ptr()) };
                             }
                             for (side, id) in [(0, *HAND_LEFT_ID), (1, *HAND_RIGHT_ID)] {
                                 match ctx.get_device_motion(id, sample_timestamp) {
                                     Some(m) => {
-                                        let (q, p) = (m.pose.orientation.to_array(), m.pose.position.to_array());
+                                        let (q, mut p) = (m.pose.orientation.to_array(), m.pose.position.to_array());
+                                        p[1] += height_offset; // hands move with the head's frame
                                         let (lv, av) = (m.linear_velocity.to_array(), world_av(&m));
                                         unsafe { nvh::nvh_ipc_publish_hand(ipc, side, 1, q.as_ptr(), p.as_ptr(), lv.as_ptr(), av.as_ptr()) };
                                     }

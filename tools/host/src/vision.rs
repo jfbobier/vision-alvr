@@ -44,6 +44,8 @@ pub struct Settings {
     pub gpu_sched_class: Option<i64>,
     pub debug: Option<bool>,
     pub gamma: Option<f32>,
+    /// headset height above the floor handed to games (m); 0 = the headset's own floor estimate
+    pub height_m: Option<f32>,
     /// brightness, contrast, saturation, sharpening (0 = neutral)
     pub color: [f32; 4],
 }
@@ -65,6 +67,7 @@ pub fn load_settings(path: &Path) -> Settings {
         gpu_sched_class: video["gpu_sched_class"].as_i64(),
         debug: v["debug"].as_bool(),
         gamma: v["display"]["gamma"].as_f64().map(|g| g as f32),
+        height_m: v["headset"]["height_m"].as_f64().map(|g| g as f32),
         color: ["brightness", "contrast", "saturation", "sharpening"].map(|k| v["display"][k].as_f64().unwrap_or(0.0) as f32),
     }
 }
@@ -135,6 +138,8 @@ pub fn stream_summary(session: &Path, encoded: (i32, i32)) -> String {
 // ---- control channel from the GUI (stdin lines) -------------------------------------------------------------------------
 
 pub static QUIT: AtomicBool = AtomicBool::new(false);
+/// headset height request (f32 bits, metres); 0 = none pending
+pub static HEIGHT_REQ: AtomicU32 = AtomicU32::new(0);
 /// user display gamma (f32 bits); 0 = unchanged
 pub static GAMMA_REQ: AtomicU32 = AtomicU32::new(0);
 /// -1 nothing pending, 0 debug off, 1 debug on
@@ -143,7 +148,8 @@ pub static DEBUG_REQ: AtomicI32 = AtomicI32::new(-1);
 pub static COLOR_REQ: [AtomicU32; 4] = [AtomicU32::new(0), AtomicU32::new(0), AtomicU32::new(0), AtomicU32::new(0)];
 pub static COLOR_PENDING: AtomicBool = AtomicBool::new(false);
 
-/// Commands (one per line): `quit`, `gamma <0.5..2.0>`, `debug on|off`, `color <brightness> <contrast> <saturation> <sharpening>`.
+/// Commands (one per line): `quit`, `gamma <0.5..2.0>`, `debug on|off`, `color <brightness> <contrast> <saturation> <sharpening>`,
+/// `height <m>` (headset height above the floor handed to games, re-anchored to the current pose; 0 = headset floor).
 /// End of input (the GUI went away) = quit.
 pub fn spawn_stdin_control() {
     thread::spawn(|| {
@@ -159,6 +165,11 @@ pub fn spawn_stdin_control() {
                     }
                 }
                 (Some("debug"), Some(v)) => DEBUG_REQ.store((v == "on" || v == "1") as i32, Ordering::SeqCst),
+                (Some("height"), Some(h)) => {
+                    if let Ok(h) = h.parse::<f32>() {
+                        HEIGHT_REQ.store(if h <= 0.0 { f32::MIN_POSITIVE } else { h.clamp(0.5, 2.5) }.to_bits(), Ordering::SeqCst);
+                    }
+                }
                 (Some("color"), Some(first)) => {
                     let vals: Vec<f32> = std::iter::once(first).chain(w).filter_map(|x| x.parse().ok()).collect();
                     if vals.len() == 4 {

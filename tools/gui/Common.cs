@@ -182,6 +182,9 @@ namespace VisionALVR
         public double Saturation { get => Json.Num(Root, "display.saturation", 0); set => Json.Set(Root, "display.saturation", value); }
         public double Sharpening { get => Json.Num(Root, "display.sharpening", 0); set => Json.Set(Root, "display.sharpening", value); }
         public bool HasDisplay => Json.Get(Root, "display.gamma") != null;
+        /// headset height above the floor handed to games (m), re-anchored live; 1.3 = a seated adult. 0 = the headset's floor estimate
+        public const double DefaultHeight = 1.3;
+        public double Height { get => Json.Num(Root, "headset.height_m", DefaultHeight); set => Json.Set(Root, "headset.height_m", value); }
         public void Save() => Json.Save(Paths.Settings, Root);
     }
 

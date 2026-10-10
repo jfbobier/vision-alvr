@@ -63,7 +63,10 @@ namespace VisionALVR
             AddKnob(lt, "Contrast", -30, 30, 0, () => settings.Contrast, v => settings.Contrast = v);
             AddKnob(lt, "Saturation (<0 less vivid)", -50, 50, 0, () => settings.Saturation, v => settings.Saturation = v);
             AddKnob(lt, "Sharpening", 0, 100, 0, () => settings.Sharpening, v => settings.Sharpening = v);
-            var reset = new Button { Text = "Defaults (gamma 1.2, rest neutral)", AutoSize = true };
+            // games with the action on the floor by default (Moss, Titan Isles) assume a standing user; the Vision Pro's floor estimate
+            // is unreliable, so the streamer hands games this height and keeps your own vertical movement on top of it
+            AddKnob(lt, "Height above floor, m (0 = headset)", 0, 220, AppSettings.DefaultHeight, () => settings.Height, v => settings.Height = v);
+            var reset = new Button { Text = "Defaults (gamma 1.2, height 1.30, rest neutral)", AutoSize = true };
             reset.Click += (s, e) => { foreach (var k in knobs) k.Bar.Value = (int)Math.Round(k.Def * 100); };
             lt.Controls.Add(reset);
             lt.SetColumnSpan(reset, 3);
@@ -126,6 +129,7 @@ namespace VisionALVR
         {
             string f(double v) => v.ToString("0.00", CultureInfo.InvariantCulture);
             host.Send("gamma " + f(settings.Gamma));
+            host.Send("height " + f(settings.Height));
             host.Send($"color {f(settings.Brightness)} {f(settings.Contrast)} {f(settings.Saturation)} {f(settings.Sharpening)}");
         }
 
