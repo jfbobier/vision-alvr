@@ -160,9 +160,12 @@ fn main() {
         .file(up.join("platform/win32/d3d-render-utils/RenderUtils.cpp"))
         .file(up.join("ALVR-common/exception.cpp"))
         .warnings(false);
-    b.compile("nvh");
-    for l in ["d3d11", "dxgi", "d3dcompiler", "user32", "advapi32"] {
-        println!("cargo:rustc-link-lib={l}");
+    // NVH_SKIP_CC=1: type-check only (cargo check on a machine without MSVC, e.g. WSL): the C++ library is not compiled or linked.
+    if env::var_os("NVH_SKIP_CC").is_none() {
+        b.compile("nvh");
+        for l in ["d3d11", "dxgi", "d3dcompiler", "user32", "advapi32"] {
+            println!("cargo:rustc-link-lib={l}");
+        }
     }
     println!("cargo:rerun-if-changed={}", nvenc.display());
     println!("cargo:rerun-if-changed={}", nvenc.join("../third_party/stb").display());

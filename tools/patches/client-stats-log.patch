@@ -1,0 +1,22 @@
+--- a/alvr/server_core/src/statistics.rs
++++ b/alvr/server_core/src/statistics.rs
+@@ -187,6 +187,19 @@
+         self.motion_to_photon_latency_average
+             .submit_sample(client_stats.total_pipeline_latency);
+ 
++        // VisionALVR (tools/patches/client-stats-log.patch): the headset's per-frame report, raw, keyed by the frame's
++        // timestamp; the host turns it into one CSV row per displayed frame (client_frames.csv).
++        alvr_common::log::info!(
++            "{{\"va_client_stats\":{{\"ts\":{},\"frame_interval_us\":{},\"decode_us\":{},\"decoder_queue_us\":{},\"rendering_us\":{},\"vsync_queue_us\":{},\"total_us\":{}}}}}",
++            client_stats.target_timestamp.as_nanos(),
++            client_stats.frame_interval.as_micros(),
++            client_stats.video_decode.as_micros(),
++            client_stats.video_decoder_queue.as_micros(),
++            client_stats.rendering.as_micros(),
++            client_stats.vsync_queue.as_micros(),
++            client_stats.total_pipeline_latency.as_micros()
++        );
++
+         if let Some(frame) = self
+             .history_buffer
+             .iter_mut()

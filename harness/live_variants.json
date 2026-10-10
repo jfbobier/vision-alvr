@@ -1,0 +1,70 @@
+[
+ {
+  "name": "synthetic_regular",
+  "game": "synthetic",
+  "seconds": 60,
+  "settings": {},
+  "note": "host test pattern at 90 fps, no game: isolates headset + network (expect SteamVR-like client stats if the pipeline below the host is fine)"
+ },
+ {
+  "name": "phase_rs2_deadspace",
+  "game": "dead_space",
+  "seconds": 60,
+  "settings": {},
+  "session": {
+   "max_prediction_ms": 0,
+   "bitrate_mbps": 300
+  },
+  "note": "the redesign defaults: staged pipeline, phase-paced sends, running start 2 ms"
+ },
+ {
+  "name": "vsync_rs2_deadspace",
+  "game": "dead_space",
+  "seconds": 60,
+  "settings": {
+   "send_pacing": "vsync"
+  },
+  "session": {
+   "max_prediction_ms": 0,
+   "bitrate_mbps": 300
+  },
+  "note": "ALVR's send rule (next tick after the encode): one more period of latency, flattest phase"
+ },
+ {
+  "name": "phase_rs0_deadspace",
+  "game": "dead_space",
+  "seconds": 60,
+  "settings": {
+   "running_start_ms": 0
+  },
+  "session": {
+   "max_prediction_ms": 0,
+   "bitrate_mbps": 300
+  },
+  "note": "no running start: the game is released at the tick (this morning's app pacing) under the staged pipeline"
+ },
+ {
+  "name": "asap_rs2_deadspace",
+  "game": "dead_space",
+  "seconds": 60,
+  "settings": {
+   "send_pacing": "asap"
+  },
+  "session": {
+   "max_prediction_ms": 0,
+   "bitrate_mbps": 300
+  },
+  "note": "send as encoded: arrival jitter = encode jitter (the delta the phase pacing buys)"
+ },
+ {
+  "name": "phase_rs2_cyberpunk",
+  "game": "cyberpunk",
+  "seconds": 90,
+  "settings": {},
+  "session": {
+   "max_prediction_ms": 0,
+   "bitrate_mbps": 300
+  },
+  "note": "GPU-bound game (55-60 fps): empty slots expected; the headset must repeat cleanly instead of juddering"
+ }
+]

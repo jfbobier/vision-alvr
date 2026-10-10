@@ -138,6 +138,46 @@ pub fn debug_dir() -> Option<PathBuf> {
     s.events.as_ref().and(s.debug_dir.clone())
 }
 
+/// The shim's clock (QPC seconds, what the shim and VDXR log) for host-side timestamps: set once from main with a paired
+/// (Instant, qpc) reading, then derived from Instant.
+static CLOCK: std::sync::OnceLock<(std::time::Instant, f64)> = std::sync::OnceLock::new();
+pub fn set_clock(instant: std::time::Instant, qpc_s: f64) {
+    let _ = CLOCK.set((instant, qpc_s));
+}
+pub fn qpc_now() -> f64 {
+    match CLOCK.get() {
+        Some((i, q)) => q + i.elapsed().as_secs_f64(),
+        None => 0.0,
+    }
+}
+pub fn qpc_at(instant: std::time::Instant) -> f64 {
+    match CLOCK.get() {
+        Some((i, q)) => q + instant.saturating_duration_since(*i).as_secs_f64() - i.saturating_duration_since(instant).as_secs_f64(),
+        None => 0.0,
+    }
+}
+
+/// Per-frame CSV files in the debug session folder (debug mode only): `name` is created on first use with `header`.
+static CSVS: std::sync::Mutex<Vec<(String, std::io::BufWriter<fs::File>, u32)>> = std::sync::Mutex::new(Vec::new());
+pub fn csv(name: &str, header: &str, row: &str) {
+    use std::io::Write;
+    let Some(dir) = debug_dir() else { return };
+    let Ok(mut files) = CSVS.lock() else { return };
+    if !files.iter().any(|(n, _, _)| n == name) {
+        let Ok(f) = fs::File::create(dir.join(name)) else { return };
+        let mut w = std::io::BufWriter::new(f);
+        let _ = writeln!(w, "{header}");
+        files.push((name.to_string(), w, 0));
+    }
+    if let Some((_, w, rows)) = files.iter_mut().find(|(n, _, _)| n == name) {
+        let _ = writeln!(w, "{row}");
+        *rows += 1;
+        if *rows % 90 == 0 {
+            let _ = w.flush(); // a crash loses at most a second
+        }
+    }
+}
+
 /// A host event (already a JSON line) into the debug session's `host_events.jsonl`.
 pub fn event_line(line: &str) {
     let mut s = state().lock();
@@ -170,10 +210,29 @@ impl log::Log for AlvrLogger {
             return;
         }
         let msg = format!("{}", record.args());
+        // The headset's raw per-frame report (patched into server_core's report_statistics: tools/patches/client-stats-log.patch):
+        // one CSV row per frame the headset displayed, keyed by the frame's timestamp so it joins with host_frames.csv.
+        if let Some(inner) = msg.strip_prefix("{\"va_client_stats\":").and_then(|s| s.strip_suffix('}')) {
+            if let Ok(v) = serde_json::from_str::<Value>(inner) {
+                let ms = |k: &str| v[k].as_f64().unwrap_or(0.0) / 1000.0;
+                csv("client_frames.csv",
+                    "t_recv,ts_ns,frame_interval_ms,decode_ms,decoder_queue_ms,client_comp_ms,vsync_queue_ms,total_ms",
+                    &format!("{:.6},{},{:.3},{:.3},{:.3},{:.3},{:.3},{:.3}", qpc_now(), v["ts"].as_u64().unwrap_or(0), ms("frame_interval_us"),
+                        ms("decode_us"), ms("decoder_queue_us"), ms("rendering_us"), ms("vsync_queue_us"), ms("total_us")));
+            }
+            return;
+        }
         if msg.starts_with('{') && msg.ends_with('}') {
             match serde_json::from_str::<EventType>(&msg) {
                 Ok(EventType::GraphStatistics(g)) => {
-                    client_stats::graph(&g); // per frame: aggregated, not written
+                    client_stats::graph(&g); // per frame: aggregated for the windows
+                    // and one CSV row per frame the headset reported (debug mode): the client side of the timeline
+                    csv("client_graph.csv",
+                        "t_recv,total_ms,game_ms,server_comp_ms,encode_ms,network_ms,decode_ms,decoder_queue_ms,client_comp_ms,vsync_queue_ms,client_fps,server_fps,bitrate_mbps",
+                        &format!("{:.6},{:.2},{:.2},{:.2},{:.2},{:.2},{:.2},{:.2},{:.2},{:.3},{:.1},{:.1},{:.1}", qpc_now(),
+                            g.total_pipeline_latency_s * 1000.0, g.game_time_s * 1000.0, g.server_compositor_s * 1000.0, g.encoder_s * 1000.0,
+                            g.network_s * 1000.0, g.decoder_s * 1000.0, g.decoder_queue_s * 1000.0, g.client_compositor_s * 1000.0,
+                            g.vsync_queue_s as f64 * 1000.0, g.client_fps, g.server_fps, g.bitrate_bps / 1e6));
                     return;
                 }
                 Ok(EventType::StatisticsSummary(sum)) => {
@@ -240,6 +299,7 @@ pub mod client_stats {
         client_frame_s: f64, // sum of 1 / client_fps over the samples with a sane value (client_n)
         client_n: u32,
         vsync_n: u32,        // samples with a sane vsync_queue (the client's unsigned subtraction can wrap to ~3e10 ms)
+        vsync_late: u32,     // samples whose vsync_queue wrapped: the client finished its frame after the vsync it aimed at
         since: Option<std::time::Instant>, // first sample of the window
         server_fps: f64,
         throughput_bps: f64,
@@ -248,7 +308,7 @@ pub mod client_stats {
 
     const ZERO: Agg = Agg {
         n: 0, total: 0.0, game: 0.0, compositor: 0.0, encoder: 0.0, network: 0.0, decoder: 0.0, decoder_queue: 0.0,
-        client_compositor: 0.0, vsync_queue: 0.0, client_frame_s: 0.0, client_n: 0, vsync_n: 0, since: None, server_fps: 0.0, throughput_bps: 0.0, bitrate_bps: 0.0,
+        client_compositor: 0.0, vsync_queue: 0.0, client_frame_s: 0.0, client_n: 0, vsync_n: 0, vsync_late: 0, since: None, server_fps: 0.0, throughput_bps: 0.0, bitrate_bps: 0.0,
     };
     /// Windows: 0 = encoder_stats (2 s), 1 = status (10 s), 2 = benchmark step.
     static WINDOWS: std::sync::Mutex<[Agg; 3]> = std::sync::Mutex::new([ZERO, ZERO, ZERO]);
@@ -270,6 +330,8 @@ pub mod client_stats {
             if (0.0..1.0).contains(&g.vsync_queue_s) {
                 a.vsync_queue += g.vsync_queue_s as f64;
                 a.vsync_n += 1;
+            } else {
+                a.vsync_late += 1;
             }
             // client_fps is per frame (1 / gap between two displayed frames): average the gaps, not the rates, which
             // overweighted short gaps; 0 and absurd values (1704 fps seen) are dropped
@@ -314,7 +376,7 @@ pub mod client_stats {
             "samples": a.n,
             "total_latency_ms": ms(a.total), "game_ms": ms(a.game), "server_compositor_ms": ms(a.compositor),
             "encode_ms": ms(a.encoder), "network_ms": ms(a.network), "decode_ms": ms(a.decoder),
-            "decoder_queue_ms": ms(a.decoder_queue), "client_compositor_ms": ms(a.client_compositor), "vsync_queue_ms": vsync_queue_ms,
+            "decoder_queue_ms": ms(a.decoder_queue), "client_compositor_ms": ms(a.client_compositor), "vsync_queue_ms": vsync_queue_ms, "vsync_late": a.vsync_late,
             "client_fps": client_fps, "displayed_fps": displayed_fps, "server_fps": (a.server_fps / n * 10.0).round() / 10.0,
             "throughput_mbps": (a.throughput_bps / n / 1e6 * 10.0).round() / 10.0, "bitrate_mbps": (a.bitrate_bps / n / 1e6 * 10.0).round() / 10.0,
         }))

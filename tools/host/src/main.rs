@@ -14,6 +14,7 @@ use alvr_session::CodecType;
 mod bench_quality;
 mod logs;
 mod nvidia_profile;
+mod pipeline;
 mod vision;
 
 use serde_json::json;
@@ -51,10 +52,17 @@ struct Args {
     daemon: bool,
     force_session: bool,
     split_encode: i64,
-    /// hold each encoded app frame until the next display-clock tick before sending it (ALVR's SteamVR driver sends on
-    /// its vsync grid; see the `send_on_vsync` handling in the main loop)
-    send_on_vsync: bool,
+    /// when an encoded frame leaves the host (pipeline.rs): asap | vsync (next tick) | phase (boundary + encode envelope)
+    send_pacing: pipeline::SendPacing,
     send_pacing_explicit: bool,
+    /// shim running start: the game is released this margin + its frame-time envelope before the next boundary (0 = at the tick)
+    running_start_ms: f64,
+    /// compositor boundary = display tick + this offset
+    boundary_offset_ms: f64,
+    /// D3DKMT process scheduling class asked for (5 realtime .. 2; 0 = leave)
+    gpu_sched_class: i32,
+    /// scripted controller input for unattended runs (harness): (seconds after game start, hand, click mask, trigger)
+    auto_input: Vec<(f64, usize, u32, f32)>,
     qp_map: Option<bool>,
     dump_qpmap: Option<PathBuf>,
     idle_rgb: Option<u32>,
@@ -112,7 +120,11 @@ fn parse_args() -> Result<Args, String> {
         // 5090, tools/nvenc_split_probe), so the foveated 4224x1664 frame stayed on one engine (6.9 ms vs 2.5 ms). NVENC uses
         // min(3, engines) strips, so this is also right on 1- and 2-engine GPUs.
         split_encode: 3,
-        send_on_vsync: false,
+        send_pacing: pipeline::SendPacing::Phase,
+        running_start_ms: 2.0,
+        boundary_offset_ms: 0.0,
+        gpu_sched_class: 5,
+        auto_input: vec![],
         send_pacing_explicit: false,
         qp_map: None,
         dump_qpmap: None,
@@ -202,7 +214,7 @@ fn parse_args() -> Result<Args, String> {
             }
             "--send-pacing" => {
                 a.send_pacing_explicit = true;
-                a.send_on_vsync = parse_send_pacing(&v()?)?;
+                a.send_pacing = pipeline::SendPacing::parse(&v()?)?;
             }
             "--qp-map" => {
                 a.qp_map = Some(match v()?.as_str() {
@@ -214,6 +226,32 @@ fn parse_args() -> Result<Args, String> {
             "--dump-qpmap" => a.dump_qpmap = Some(v()?.into()),
             "--idle-rgb" => a.idle_rgb = Some(parse_rgb(&v()?)?),
             "--gpu-priority" => a.gpu_priority = Some(v()?.parse().map_err(|e| format!("{e}"))?),
+            "--running-start-ms" => a.running_start_ms = v()?.parse().map_err(|e| format!("{e}"))?,
+            "--boundary-offset-ms" => a.boundary_offset_ms = v()?.parse().map_err(|e| format!("{e}"))?,
+            "--gpu-sched-class" => a.gpu_sched_class = v()?.parse().map_err(|e| format!("{e}"))?,
+            "--auto-input" => {
+                // "20:rA,26:rA,40:lT": at 20 s and 26 s after the game starts press A on the right controller, at 40 s the left
+                // trigger. Buttons: A/X primary, B/Y secondary, S thumbstick, M menu, H system, T trigger.
+                for item in v()?.split(',').filter(|x| !x.trim().is_empty()) {
+                    let (t, rest) = item.trim().split_once(':').ok_or_else(|| format!("--auto-input: expected s:hB, got {item}"))?;
+                    let t: f64 = t.parse().map_err(|e| format!("--auto-input time {t}: {e}"))?;
+                    let mut ch = rest.chars();
+                    let side = match ch.next() { Some('l') | Some('L') => 0, Some('r') | Some('R') => 1, _ => return Err(format!("--auto-input: hand l/r in {item}")) };
+                    let (mut mask, mut trigger) = (0u32, 0f32);
+                    for b in ch {
+                        match b.to_ascii_uppercase() {
+                            'A' | 'X' => mask |= 1,
+                            'B' | 'Y' => mask |= 2,
+                            'S' => mask |= 4,
+                            'M' => mask |= 8,
+                            'H' => mask |= 16,
+                            'T' => trigger = 1.0,
+                            o => return Err(format!("--auto-input: unknown button {o} in {item}")),
+                        }
+                    }
+                    a.auto_input.push((t, side, mask, trigger));
+                }
+            }
             "--force-session" => a.force_session = true,
             "--daemon" => a.daemon = true, // run until stopped: no connect/stream time limits (reconnects are handled)
             "--shim" => {
@@ -268,20 +306,21 @@ fn parse_split(v: &str) -> Result<i64, String> {
     })
 }
 
-fn parse_send_pacing(s: &str) -> Result<bool, String> {
-    match s {
-        "vsync" | "tick" => Ok(true),
-        "asap" | "off" => Ok(false),
-        o => Err(format!("--send-pacing asap|vsync, got {o}")),
-    }
-}
-
 /// Fills what the command line left open from `config/visionalvr.json`, then applies the encode profile's implications.
 fn apply_settings(a: &mut Args, st: &vision::Settings) {
     if !a.send_pacing_explicit {
-        if let Some(p) = st.send_pacing.as_deref().and_then(|p| parse_send_pacing(p).ok()) {
-            a.send_on_vsync = p;
+        if let Some(p) = st.send_pacing.as_deref().and_then(|p| pipeline::SendPacing::parse(p).ok()) {
+            a.send_pacing = p;
         }
+    }
+    if let Some(v) = st.running_start_ms {
+        a.running_start_ms = v;
+    }
+    if let Some(v) = st.boundary_offset_ms {
+        a.boundary_offset_ms = v;
+    }
+    if let Some(v) = st.gpu_sched_class {
+        a.gpu_sched_class = v as i32;
     }
     if a.idle_rgb.is_none() {
         a.idle_rgb = st.idle_rgb;
@@ -418,7 +457,7 @@ impl StatsWindow {
     fn new() -> Self {
         Self { start: Instant::now(), first_idx: 0, bytes0: 0, samples0: 0, slices0: 0, matched0: 0, fallback0: 0, ticks0: 0 }
     }
-    fn tick(&mut self, origin: Instant, encode_ms: &[f64], bytes: u64, live: Option<&LiveCtx>, shim: Option<(u32, u32, u32)>, intake_ms: &[f64], ffr_wait_ms: &[f64]) {
+    fn tick(&mut self, origin: Instant, encode_ms: &[f64], bytes: u64, slices: Option<(usize, usize)>, shim: Option<(u32, u32, u32)>, intake_ms: &[f64], ffr_wait_ms: &[f64], extra: Option<serde_json::Value>) {
         if self.start.elapsed() < Duration::from_secs(2) {
             return;
         }
@@ -426,7 +465,7 @@ impl StatsWindow {
         let mut w = encode_ms[self.first_idx.min(encode_ms.len())..].to_vec();
         w.sort_by(|a, b| a.partial_cmp(b).unwrap());
         let q = |p: f64| w.get(((w.len() as f64) * p) as usize).copied().unwrap_or(0.0);
-        let (samples, slices) = live.map(|l| (l.slice_samples, l.slices)).unwrap_or((0, 0));
+        let (samples, slices) = slices.unwrap_or((0, 0));
         let (submit_mode, matched, fallback) = shim.unwrap_or((0, 0, 0));
         let mut e = json!({
             "frames": w.len(), "fps": w.len() as f64 / secs, "encode_ms_avg": w.iter().sum::<f64>() / w.len().max(1) as f64,
@@ -485,6 +524,9 @@ impl StatsWindow {
                 e["send_hold_ms"] = pct_json(&mut v, &[]);
                 e["send_hold_ms"]["late_frames"] = json!(late);
             }
+        }
+        if let Some(x) = extra {
+            e["pipeline"] = x;
         }
         event(origin, "encoder_stats", e);
         *self = Self { start: Instant::now(), first_idx: encode_ms.len(), bytes0: bytes, samples0: samples, slices0: slices, matched0: matched, fallback0: fallback, ticks0: VSYNC_TICKS.load(Ordering::Relaxed) };
@@ -636,6 +678,10 @@ mod nvh {
         pub fn nvh_gpu_info(buf: *mut c_char, len: i32) -> i32;
         pub fn nvh_gpu_sample(buf: *mut c_char, len: i32) -> i32;
         pub fn nvh_ipc_shim_stats(ipc: *mut c_void, submit_mode: *mut u32, ts_matched: *mut u32, ts_fallback: *mut u32);
+        pub fn nvh_ipc_slot_busy(ipc: *mut c_void, slot: u32, busy: i32);
+        pub fn nvh_ipc_set_pacing(ipc: *mut c_void, boundary_offset_ms: f32, running_start_ms: f32);
+        pub fn nvh_ipc_shim_pacing(ipc: *mut c_void, slot_busy_waits: *mut u32, app_frame_ms: *mut f32, releases: *mut u64, releases_late: *mut u64);
+        pub fn nvh_set_gpu_scheduling(cls: i32) -> i32;
     }
 }
 
@@ -687,7 +733,7 @@ impl HandInputState {
     }
 }
 
-struct LiveCtx {
+pub(crate) struct LiveCtx {
     ctx: Arc<ServerCoreContext>,
     shared: Arc<Shared>,
     packet_bytes: usize,
@@ -705,16 +751,6 @@ struct LiveCtx {
     /// vsync send pacing: on_packet queues the encoded frame in `pending` while this is set; the main loop sends it at the tick
     hold_now: bool,
     pending: Vec<(Duration, Vec<u8>, bool, Option<Vec<u8>>)>,
-}
-
-/// Sends the packets `on_packet` queued while `hold_now` was set (in order, config NALs first).
-fn flush_pending(live: &mut LiveCtx) {
-    for (ts, frame, is_idr, config) in live.pending.drain(..) {
-        if let Some(c) = config {
-            live.ctx.set_video_config_nals(c, CodecType::Hevc);
-        }
-        live.ctx.send_video_nal(ts, frame, is_idr);
-    }
 }
 
 extern "C" fn on_packet(user: *mut std::ffi::c_void, data: *const u8, len: i32, ts_ns: u64, is_idr: i32) {
@@ -1013,21 +1049,6 @@ fn bound_history<T>(v: &mut Vec<T>) -> usize {
 /// An encode failed. In --daemon mode (the installed host) a transient failure, e.g. a shim ring that was just recreated by a new
 /// app, must not end the process: drop the frame, reopen the shared slots, restart from an IDR. Gives up after 30 in a row.
 /// Returns false when the caller should stop.
-fn tolerate_encode_error(origin: Instant, args: &Args, shared: &Shared, enc: *mut std::ffi::c_void, msg: &str, total: &mut usize, consecutive: &mut usize) -> bool {
-    *total += 1;
-    *consecutive += 1;
-    event(origin, "encode_error", json!({ "message": msg, "consecutive": *consecutive, "total": *total }));
-    if *consecutive == 1 || *consecutive >= 30 {
-        logs::general("ERROR", &format!("encode failed ({} in a row): {msg}", *consecutive));
-    }
-    if !args.daemon || *consecutive >= 30 {
-        return false;
-    }
-    unsafe { nvh::nvh_release_shared(enc) };
-    shared.restart_from_idr.store(true, Ordering::SeqCst);
-    true
-}
-
 /// The headset's last views (FoV tangents, eye offsets), kept across runs so an OpenXR app can start before this connection's
 /// ViewsConfig arrives (the visionOS client sends it after its first decoded frame).
 fn load_views(path: &std::path::Path) -> Option<([f32; 8], [f32; 6])> {
@@ -1062,7 +1083,7 @@ fn default_playback_device_id() -> Option<String> {
 }
 
 #[derive(Default)]
-struct Shared {
+pub(crate) struct Shared {
     /// views (fov tangents, eye offsets) from the latest ViewsConfig event, applied by the main loop (which owns the encoder)
     pending_views: Mutex<Option<([f32; 8], [f32; 6])>>,
     /// ClientConnected seen, not yet handled by the main loop (which checks the encoder against the negotiated stream)
@@ -1316,7 +1337,7 @@ fn main() {
         let data = json!({ "frames": n, "avg_ms": avg, "p50_ms": p50, "p95_ms": p95, "min_ms": v.iter().cloned().fold(f64::MAX, f64::min),
             "max_ms": v.iter().cloned().fold(0.0, f64::max), "width": enc_size.0, "height": enc_size.1, "profile": format!("{:?}", args.encode_profile),
             "split_encode_mode": args.split_encode, "nvenc_engines": unsafe { nvh::nvh_encoder_engines(enc_handle) },
-            "send_pacing": if args.send_on_vsync { "vsync" } else { "asap" },
+            "send_pacing": args.send_pacing.name(),
             "slices_per_frame": live.as_ref().map(|l| l.slices as f64 / l.slice_samples.max(1) as f64),
             "fps": args.fps, "budget_ms": budget, "fits": p95 < budget * 0.9, "noise": args.noise, "noise_block": args.noise_block, "noise_amp": args.noise_amp,
             "target_mbps": mbps, "produced_mbps_at_fps": live.as_ref().map(|l| l.bytes_total as f64 * 8.0 / n.max(1) as f64 * args.fps / 1e6) });
@@ -1325,6 +1346,24 @@ fn main() {
             if p95 < budget * 0.9 { "fits" } else { "does NOT fit" }, args.fps));
         std::process::exit(0);
     }
+    // Shim mode: the staged pipeline owns the encoder from here on (intake / clock pick / encoder / sender threads).
+    let mut pipeline: Option<Arc<pipeline::Pipeline>> = None;
+    let vsync_period_ns = Arc::new(AtomicU64::new((1e9 / args.fps) as u64));
+    if args.shim {
+        let l = live.take().expect("live encoder context");
+        let h = std::mem::replace(&mut enc_handle, std::ptr::null_mut());
+        let p = pipeline::Pipeline::new(
+            pipeline::Config { origin, period_ns: Arc::clone(&vsync_period_ns), send_pacing: args.send_pacing, daemon: args.daemon, fps: args.fps },
+            ipc_addr, Arc::clone(&ctx), Arc::clone(&shared), pipeline::Encoder { handle: h, live: l });
+        logs::set_clock(Instant::now(), unsafe { nvh::nvh_qpc_seconds() });
+        unsafe { nvh::nvh_ipc_set_pacing(ipc, args.boundary_offset_ms as f32, args.running_start_ms as f32) };
+        p.set_gpu_scheduling(args.gpu_sched_class);
+        p.start();
+        event(origin, "pacing_config", json!({ "send_pacing": args.send_pacing.name(), "running_start_ms": args.running_start_ms,
+            "boundary_offset_ms": args.boundary_offset_ms, "gpu_sched_class": args.gpu_sched_class, "ring_slots": 6 }));
+        pipeline = Some(p);
+    }
+    let app_alive = || pipeline.as_ref().map(|p| p.app_alive.load(Ordering::Relaxed)).unwrap_or(false);
     let mut encode_ms: Vec<f64> = vec![];
     let mut compose_ms: Vec<f64> = vec![];
     let mut ffr_ms: Vec<f64> = vec![];
@@ -1481,11 +1520,12 @@ fn main() {
     // Display clock: its own thread, so a long encode can never delay a vsync tick (the OpenXR app waits on it). Ticks follow ALVR's
     // pacing grid (`duration_until_next_vsync`); the interval to the next tick is published so the shim can predict display times.
     let vsync_ticks = Arc::new(AtomicU64::new(0));
-    let vsync_period_ns = Arc::new(AtomicU64::new((1e9 / args.fps) as u64));
     let vsync_stop = Arc::new(AtomicBool::new(false));
     let vsync_thread = if args.shim {
         let (ctx, ticks, period_ns, stop) = (Arc::clone(&ctx), Arc::clone(&vsync_ticks), Arc::clone(&vsync_period_ns), Arc::clone(&vsync_stop));
         let daemon = args.daemon;
+        let clock_pipeline = pipeline.clone();
+        let boundary_offset = Duration::from_secs_f64(args.boundary_offset_ms.max(0.0) / 1000.0);
         Some(thread::spawn(move || {
             #[cfg(windows)]
             unsafe {
@@ -1522,7 +1562,17 @@ fn main() {
                 NEXT_TICK_NS.store((now + interval).duration_since(origin).as_nanos() as u64, Ordering::Relaxed);
                 unsafe { nvh::nvh_ipc_vsync(ipc, interval.as_secs_f64()) };
                 ticks.fetch_add(1, Ordering::Relaxed);
-                VSYNC_TICKS.fetch_add(1, Ordering::Relaxed);
+                let tick_idx = VSYNC_TICKS.fetch_add(1, Ordering::Relaxed) + 1;
+                if let Some(p) = &clock_pipeline {
+                    // compositor boundary: the newest complete app frame goes to the encoder (pipeline.rs)
+                    let b = if boundary_offset > Duration::ZERO && boundary_offset + Duration::from_millis(2) < interval {
+                        sleep_spin_until(now + boundary_offset);
+                        now + boundary_offset
+                    } else {
+                        now
+                    };
+                    p.on_boundary(tick_idx, b);
+                }
                 if let Some(l) = last {
                     let ms = now.duration_since(l).as_secs_f64() * 1000.0;
                     if ms > 1.8 * nominal.as_secs_f64() * 1000.0 {
@@ -1541,11 +1591,11 @@ fn main() {
     } else {
         None
     };
-    let mut last_green_tick = 0u64;
+    let last_green_tick = 0u64;
     let mut last_sent_ts = Duration::ZERO;
     let mut stats_win = StatsWindow::new();
     let mut intake_ms: Vec<f64> = vec![];
-    let mut last_intake: Option<Instant> = None;
+    let last_intake: Option<Instant> = None;
 
     // sender (the "compositor + encoder" stand-in)
     let period = Duration::from_secs_f64(1.0 / args.fps);
@@ -1573,7 +1623,7 @@ fn main() {
     let mut last_views = load_views(&views_path);
     let mut views_published = false;
     let mut deferred_reconfig = false;
-    let (mut encode_errors, mut consecutive_errors) = (0usize, 0usize);
+    let (mut encode_errors, consecutive_errors) = (0usize, 0usize);
     if !ipc.is_null() {
         push_user(ipc, user_gamma, debug_on);
     }
@@ -1584,6 +1634,9 @@ fn main() {
         submitted0: u32,
     }
     let mut game: Option<GameRun> = None;
+    // scripted input (--auto-input): index of the next event to fire and the release instant of a pressed one
+    let mut auto_next = 0usize;
+    let mut auto_release: Option<(Instant, usize)> = None;
     let shim_submitted = |ipc: *mut std::ffi::c_void| -> u32 {
         let (mut m, mut a, mut b) = (0u32, 0u32, 0u32);
         if !ipc.is_null() {
@@ -1631,7 +1684,7 @@ fn main() {
                 event(origin, "user_settings", json!({ "gamma": user_gamma, "debug": debug_on, "debug_dir": logs::debug_dir() }));
             }
             // game start / end, for the general log and the GUI
-            let alive = unsafe { nvh::nvh_ipc_shim_alive(ipc) } != 0;
+            let alive = app_alive();
             if alive && game.is_none() {
                 let mut b = [0 as std::ffi::c_char; 256];
                 unsafe { nvh::nvh_ipc_app_exe(ipc, b.as_mut_ptr(), b.len() as i32) };
@@ -1649,6 +1702,21 @@ fn main() {
                     "game ended: {} after {}m{:02}s, {} frames rendered ({:.1} fps), {} streamed ({:.1} fps)",
                     g.exe, secs as u64 / 60, secs as u64 % 60, submitted, submitted as f64 / secs.max(1e-3), frames, frames as f64 / secs.max(1e-3)));
                 event(origin, "game_ended", json!({ "exe": g.exe, "seconds": secs, "frames_rendered": submitted, "frames_streamed": frames }));
+            }
+            if let Some(g) = &game {
+                if let Some((until, side)) = auto_release {
+                    if Instant::now() >= until {
+                        unsafe { nvh::nvh_ipc_publish_input(ipc, side as i32, 0, 0, 0.0, 0.0, 0.0, 0.0) };
+                        auto_release = None;
+                    }
+                }
+                if auto_release.is_none() && auto_next < args.auto_input.len() && g.start.elapsed().as_secs_f64() >= args.auto_input[auto_next].0 {
+                    let (t, side, mask, trigger) = args.auto_input[auto_next];
+                    unsafe { nvh::nvh_ipc_publish_input(ipc, side as i32, mask, mask, trigger, 0.0, 0.0, 0.0) };
+                    auto_release = Some((Instant::now() + Duration::from_millis(150), side));
+                    event(origin, "auto_input", json!({ "t": t, "hand": side, "clicks": mask, "trigger": trigger }));
+                    auto_next += 1;
+                }
             }
         }
         if status_at.elapsed() >= Duration::from_secs(10) {
@@ -1681,21 +1749,22 @@ fn main() {
             if connect {
                 views_published = false;
             }
-            if connect || (deferred_reconfig && unsafe { nvh::nvh_ipc_shim_alive(ipc) } == 0) {
+            if connect || (deferred_reconfig && !app_alive()) {
                 // Rebuild the encoder if the negotiated stream (resolution, refresh rate, foveation) differs from what it was built
                 // from (a stale `openvr_config` cache). Not while an app runs: its swapchain/ring sizes are fixed; then it is
                 // retried as soon as the app has exited.
                 let want = read_stream_cfg(&layout.session());
                 if want == cur_cfg {
                     deferred_reconfig = false;
-                } else if unsafe { nvh::nvh_ipc_shim_alive(ipc) } != 0 {
+                } else if app_alive() {
                     if !deferred_reconfig {
                         logs::general("WARN", "the headset negotiated a different stream while a game runs: the encoder is rebuilt when the game exits (restart the game)");
                         event(origin, "reconfigure_deferred", json!({ "running": format!("{cur_cfg:?}"), "negotiated": format!("{want:?}") }));
                     }
                     deferred_reconfig = true;
                 } else {
-                    unsafe { nvh::nvh_destroy(enc_handle) };
+                    let mut g = pipeline.as_ref().expect("pipeline").enc.lock();
+                    unsafe { nvh::nvh_destroy(g.handle) };
                     let (w, h, session_fps) = configure_encoder(&layout.session(), args.split_encode, qp_on, &host_keys);
                     eye_size = (w / 2, h);
                     if !args.fps_explicit {
@@ -1703,17 +1772,17 @@ fn main() {
                     }
                     let (mut ew, mut eh) = (0i32, 0i32);
                     unsafe { nvh::nvh_encoded_size(&mut ew, &mut eh) };
-                    let user = &mut **live.as_mut().unwrap() as *mut LiveCtx as *mut std::ffi::c_void;
+                    let user = &mut *g.live as *mut LiveCtx as *mut std::ffi::c_void;
                     let mut err = [0 as std::ffi::c_char; 256];
-                    enc_handle = unsafe { nvh::nvh_create(ew, eh, args.noise, on_packet, on_params, user, err.as_mut_ptr(), 256) };
-                    if enc_handle.is_null() {
+                    g.handle = unsafe { nvh::nvh_create(ew, eh, args.noise, on_packet, on_params, user, err.as_mut_ptr(), 256) };
+                    if g.handle.is_null() {
                         eprintln!("NVENC re-init failed: {}", unsafe { std::ffi::CStr::from_ptr(err.as_ptr()) }.to_string_lossy());
                         std::process::exit(4);
                     }
                     if let Some(duty) = args.gpu_keepalive {
-                        unsafe { nvh::nvh_keepalive(enc_handle, 1, duty) };
+                        unsafe { nvh::nvh_keepalive(g.handle, 1, duty) };
                     }
-                    nvenc_cfg = describe_encoder(origin, enc_handle, &args.dump_qpmap);
+                    nvenc_cfg = describe_encoder(origin, g.handle, &args.dump_qpmap);
                     logs::general("INFO", &format!("encoder rebuilt for the negotiated stream: {ew}x{eh} (was {}x{})", enc_size.0, enc_size.1));
                     event(origin, "reconfigured", json!({
                         "from": format!("{cur_cfg:?}"), "to": format!("{want:?}"),
@@ -1742,7 +1811,7 @@ fn main() {
                 // the same headset sent last time (they arrive again right after the first decoded frame)
                 if let Some((fov8, off6)) = last_views {
                     unsafe {
-                        nvh::nvh_ipc_config(ipc, enc_handle, args.fps, eye_size.0, eye_size.1, fov8.as_ptr(), off6.as_ptr(), 10, read_encoding_gamma(&layout.session()));
+                        nvh::nvh_ipc_config(ipc, pipeline.as_ref().map(|p| p.enc.lock().handle).unwrap_or(enc_handle), args.fps, eye_size.0, eye_size.1, fov8.as_ptr(), off6.as_ptr(), 10, read_encoding_gamma(&layout.session()));
                         nvh::nvh_ipc_set_connected(ipc, 1); // after the config: the shim waits for this flag
                     }
                     views_published = true;
@@ -1750,6 +1819,9 @@ fn main() {
             }
         }
         let connected = shared.client_connected.load(Ordering::SeqCst);
+        if let Some(p) = &pipeline {
+            p.active.store(connected && shared.stream_ready.load(Ordering::SeqCst), Ordering::Relaxed);
+        }
         if connected && connected_at.is_none() {
             connected_at = Some(Instant::now());
         }
@@ -1799,137 +1871,35 @@ fn main() {
                 thread::sleep(Duration::from_millis(2));
                 continue;
             }
-            let wait_ms = 4; // frames wake the wait; the timeout only bounds the haptics/views polling latency
-            let app_alive = unsafe { nvh::nvh_ipc_shim_alive(ipc) } != 0;
-            if app_alive {
-                green_active = false;
+            // The pipeline threads do intake / pick / encode / send; this loop keeps the bookkeeping and the statistics.
+            let p = pipeline.as_ref().expect("pipeline");
+            if let Some(msg) = p.failed.lock().clone() {
+                eprintln!("encode failed: {msg}");
+                break;
             }
-            let (mut counter, mut slot, mut cts, mut submit_s) = (0u64, 0u32, 0u64, 0f64);
-            if unsafe { nvh::nvh_ipc_wait_frame(ipc, wait_ms, &mut counter, &mut slot, &mut cts, &mut submit_s) } == 0 {
-                // No app frame. With no OpenXR app running, keep the headset fed with pure green (it chroma-keys green, so
-                // the user sees through). If an app is alive but stalled, send nothing: the headset re-presents its last frame.
-                let tick = vsync_ticks.load(Ordering::Relaxed);
-                if !app_alive && tick.wrapping_sub(last_green_tick) >= (args.fps / 30.0).round().max(1.0) as u64 {
-                    last_green_tick = tick;
-                    last_intake = None;
-                    if !green_active {
-                        unsafe { nvh::nvh_release_shared(enc_handle) }; // the app's ring is gone: free its VRAM
-                    }
-                    green_active = true;
-                    // Green frames carry no pose, so stamp them clearly in the past: the first app frame is stamped with the pose it
-                    // was rendered with, which is a few ms older than the freshest tracking sample, and timestamps must not go backwards.
-                    let ts = shared.latest_sample_ts.lock().map(|t| t.saturating_sub(Duration::from_millis(50)))
-                        .unwrap_or_else(|| connected_at.map(|t| t.elapsed()).unwrap_or_default())
-                        .max(last_sent_ts); // ...but never behind the last frame sent (an app that just ended)
-                    last_sent_ts = ts;
-                    if shared.restart_from_idr.load(Ordering::SeqCst) && last_idr_restart.elapsed() >= min_idr_interval {
-                        shared.restart_from_idr.store(false, Ordering::SeqCst);
-                        last_idr_restart = Instant::now();
-                        idr_restarts_honoured += 1;
-                        idx = 0;
-                    }
-                    let l = live.as_mut().unwrap();
-                    let force_idr = idx == 0;
-                    idx += 1;
-                    l.packet_bytes = 0;
-                    l.packet_idr = false;
-                    ctx.report_present(ts, Duration::ZERO);
-                    ctx.report_composed(ts, Duration::ZERO);
-                    let mut err = [0 as std::ffi::c_char; 256];
-                    let ms = unsafe { nvh::nvh_encode_green(enc_handle, 0, ts.as_nanos() as u64, force_idr as i32, err.as_mut_ptr(), 256) };
-                    if ms < 0.0 {
-                        let msg = unsafe { std::ffi::CStr::from_ptr(err.as_ptr()) }.to_string_lossy().to_string();
-                        if !tolerate_encode_error(origin, &args, &shared, enc_handle, &msg, &mut encode_errors, &mut consecutive_errors) {
-                            eprintln!("green encode failed: {msg}");
-                            break;
-                        }
-                        continue;
-                    }
-                    consecutive_errors = 0;
-                    green_frames += 1;
-                    frame_rows.push(format!("-1,{},{},{},{ms:.2}", ts.as_nanos(), l.packet_bytes, l.packet_idr as u8));
-                    shared.bytes_sent.fetch_add(l.packet_bytes as u64, Ordering::Relaxed);
-                }
-                continue;
+            let d = p.drain();
+            encode_ms.extend(d.encode_ms);
+            compose_ms.extend(d.compose_ms);
+            ffr_ms.extend(d.ffr_ms);
+            ffr_wait_ms.extend(d.ffr_wait_ms);
+            intake_ms.extend(d.intake_ms);
+            frame_rows.extend(d.frame_rows);
+            sent_ts.extend(d.sent_ts);
+            green_frames = p.green_frames.load(Ordering::Relaxed) as usize;
+            green_active = p.green_frames.load(Ordering::Relaxed) > 0 && !app_alive();
+            idr_restarts_honoured = p.idr_restarts.load(Ordering::Relaxed) as usize;
+            encode_errors = p.encode_errors.load(Ordering::Relaxed) as usize;
+            dropped_no_ts = p.frames_before_first_tracking.load(Ordering::Relaxed) as usize;
+            if let Some(ts) = sent_ts.last() {
+                last_sent_ts = last_sent_ts.max(Duration::from_nanos(*ts));
             }
-            let intake = Instant::now();
-            if let Some(l) = last_intake {
-                intake_ms.push(intake.duration_since(l).as_secs_f64() * 1000.0);
-            }
-            last_intake = Some(intake);
-            let ts = if cts != 0 {
-                Duration::from_nanos(cts)
-            } else {
-                dropped_no_ts += 1;
-                shared.latest_sample_ts.lock().unwrap_or_default()
-            };
-            if shared.restart_from_idr.load(Ordering::SeqCst) && last_idr_restart.elapsed() >= min_idr_interval {
-                shared.restart_from_idr.store(false, Ordering::SeqCst);
-                last_idr_restart = Instant::now();
-                idr_restarts_honoured += 1;
-                idx = 0;
-            }
-            if ts != Duration::ZERO && ts == last_sent_ts {
-                SAME_TS_FRAMES.fetch_add(1, Ordering::Relaxed);
-            }
-            last_sent_ts = last_sent_ts.max(ts);
-            let l = live.as_mut().unwrap();
-            let force_idr = idx == 0;
-            idx += 1;
-            l.packet_bytes = 0;
-            l.packet_idr = false;
-            l.pending.clear();
-            l.hold_now = args.send_on_vsync;
-            let frame_no = shared.frames_sent.load(Ordering::Relaxed);
-            // Real timings for ALVR's statistics: the app presented (submitted) the frame at submit_s, the shim finished
-            // composing it then, and the encoder starts now.
-            let since_submit = Duration::from_secs_f64((unsafe { nvh::nvh_qpc_seconds() } - submit_s).max(0.0));
-            ctx.report_present(ts, since_submit);
-            ctx.report_composed(ts, since_submit);
-            let mut err = [0 as std::ffi::c_char; 256];
-            let ms = unsafe { nvh::nvh_encode_shared(enc_handle, ipc, slot, counter as u32, ts.as_nanos() as u64, force_idr as i32, err.as_mut_ptr(), 256) };
-            l.hold_now = false;
-            if ms < 0.0 {
-                l.pending.clear();
-                let msg = unsafe { std::ffi::CStr::from_ptr(err.as_ptr()) }.to_string_lossy().to_string();
-                if !tolerate_encode_error(origin, &args, &shared, enc_handle, &msg, &mut encode_errors, &mut consecutive_errors) {
-                    eprintln!("encode failed: {msg}");
-                    break;
-                }
-                continue;
-            }
-            if args.send_on_vsync {
-                // Send on the display clock, like ALVR's SteamVR driver (the compositor presents at vsync and the driver sleeps
-                // until the next grid point after each Present): the headset then sees a regular cadence instead of
-                // tick + render time + encode time. A frame that is already past the tick goes out at once.
-                let next = origin + Duration::from_nanos(NEXT_TICK_NS.load(Ordering::Relaxed));
-                let t0 = Instant::now();
-                if next > t0 {
-                    sleep_spin_until(next);
-                    push_bounded(&HOLD_MS, next.duration_since(t0).as_secs_f64() * 1000.0);
-                } else {
-                    push_bounded(&HOLD_MS, 0.0);
-                }
-                flush_pending(l);
-                push_bounded(&SEND_PHASE_MS, Instant::now().saturating_duration_since(next).as_secs_f64() * 1000.0);
-            } else {
-                let last_tick = origin + Duration::from_nanos(LAST_TICK_NS.load(Ordering::Relaxed));
-                push_bounded(&SEND_PHASE_MS, Instant::now().saturating_duration_since(last_tick).as_secs_f64() * 1000.0);
-            }
-            consecutive_errors = 0;
-            encode_ms.push(ms);
-            ffr_wait_ms.push(unsafe { nvh::nvh_last_ffr_gpu_ms(enc_handle) } as f64);
+            let slices = { let g = p.enc.lock(); (g.live.slice_samples, g.live.slices) };
             let shim_stats = {
                 let (mut m, mut a, mut b) = (0u32, 0u32, 0u32);
                 unsafe { nvh::nvh_ipc_shim_stats(ipc, &mut m, &mut a, &mut b) };
                 (m, a, b)
             };
-            stats_win.tick(origin, &encode_ms, shared.bytes_sent.load(Ordering::Relaxed) + l.packet_bytes as u64, Some(&**l), Some(shim_stats), &intake_ms, &ffr_wait_ms);
-            compose_ms.push(unsafe { nvh::nvh_ipc_last_compose_ms(ipc) } as f64);
-            ffr_ms.push(unsafe { nvh::nvh_last_ffr_gpu_ms(enc_handle) } as f64);
-            // frame column = the shim's frame counter (what the app submitted), so the harness can match app frames
-            frame_rows.push(format!("{counter},{},{},{},{ms:.2}", ts.as_nanos(), l.packet_bytes, l.packet_idr as u8));
-            sent_ts.push(ts.as_nanos() as u64);
+            stats_win.tick(origin, &encode_ms, shared.bytes_sent.load(Ordering::Relaxed), Some(slices), Some(shim_stats), &intake_ms, &ffr_wait_ms, Some(p.stats_json()));
             if args.daemon {
                 // the logon-task host runs for days: keep the per-frame histories bounded
                 stats_win.first_idx = stats_win.first_idx.saturating_sub(bound_history(&mut encode_ms));
@@ -1940,9 +1910,8 @@ fn main() {
                 bound_history(&mut sent_ts);
                 bound_history(&mut intake_ms);
             }
-            shared.frames_sent.fetch_add(1, Ordering::Relaxed);
-            shared.bytes_sent.fetch_add(l.packet_bytes as u64, Ordering::Relaxed);
-            let _ = frame_no;
+            let _ = (last_green_tick, consecutive_errors, min_idr_interval, last_idr_restart, last_intake);
+            thread::sleep(Duration::from_millis(2));
             continue;
         }
 
@@ -2025,7 +1994,7 @@ fn main() {
                 break;
             }
             encode_ms.push(ms);
-            stats_win.tick(origin, &encode_ms, shared.bytes_sent.load(Ordering::Relaxed) + l.packet_bytes as u64, Some(&**l), None, &[], &[]);
+            stats_win.tick(origin, &encode_ms, shared.bytes_sent.load(Ordering::Relaxed) + l.packet_bytes as u64, Some((l.slice_samples, l.slices)), None, &[], &[], None);
             frame_rows.push(format!("{frame_no},{},{},{},{ms:.2}", ts.as_nanos(), l.packet_bytes, l.packet_idr as u8));
             sent_ts.push(ts.as_nanos() as u64);
             shared.frames_sent.fetch_add(1, Ordering::Relaxed);
@@ -2066,6 +2035,26 @@ fn main() {
     };
     vsync_stop.store(true, Ordering::Relaxed);
     let vsync_intervals = vsync_thread.map(|t| t.join().unwrap_or_default()).unwrap_or_default();
+    let mut pipeline_report = json!(null);
+    if let Some(p) = pipeline.take() {
+        p.stop();
+        pipeline_report = p.stats_json();
+        let d = p.drain();
+        encode_ms.extend(d.encode_ms);
+        frame_rows.extend(d.frame_rows);
+        sent_ts.extend(d.sent_ts);
+        match Arc::try_unwrap(p) {
+            Ok(p) => {
+                let e = p.enc.into_inner();
+                enc_handle = e.handle;
+                live = Some(e.live);
+            }
+            Err(p) => {
+                enc_handle = p.enc.lock().handle; // threads are joined: nobody else uses it any more
+                std::mem::forget(p);
+            }
+        }
+    }
     let vsync_intervals_json = interval_stats(&vsync_intervals, 1000.0 / args.fps);
     let encoder_json = if args.live {
         let mut v = encode_ms.clone();
@@ -2123,6 +2112,7 @@ fn main() {
         "qp_map": qp_on,
         "pacing": json!({ "vsync_ticks": vsync_ticks.load(Ordering::Relaxed), "vsync_interval_ms": vsync_intervals_json, "frame_intake_ms": interval_stats(&intake_ms, 1000.0 / args.fps) }),
         "encoder": encoder_json,
+        "pipeline": pipeline_report,
     });
     if let Some(p) = &args.frames_csv {
         fs::write(p, format!("frame,ts_ns,bytes,idr,encode_ms\n{}", frame_rows.join("\n"))).ok();

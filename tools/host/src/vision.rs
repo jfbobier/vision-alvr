@@ -33,9 +33,15 @@ pub struct Settings {
     pub encode_profile: Option<String>,
     pub qp_map: Option<bool>,
     pub split_encode: Option<String>,
-    /// "asap" (default) or "vsync": hold each encoded frame until the next display-clock tick before sending it
+    /// "asap" | "vsync" | "phase" (default): when an encoded frame leaves the host (tools/host/src/pipeline.rs)
     pub send_pacing: Option<String>,
     pub gpu_priority: Option<i64>,
+    /// shim running start margin in ms (0 = release the game at the display tick)
+    pub running_start_ms: Option<f64>,
+    /// compositor boundary offset after the display tick, ms
+    pub boundary_offset_ms: Option<f64>,
+    /// D3DKMT process scheduling class to ask for (5 realtime .. 2; 0 = leave)
+    pub gpu_sched_class: Option<i64>,
     pub debug: Option<bool>,
     pub gamma: Option<f32>,
     /// brightness, contrast, saturation, sharpening (0 = neutral)
@@ -54,6 +60,9 @@ pub fn load_settings(path: &Path) -> Settings {
         split_encode: video["split_encode"].as_str().map(str::to_string),
         send_pacing: video["send_pacing"].as_str().map(str::to_string),
         gpu_priority: video["gpu_priority"].as_i64(),
+        running_start_ms: video["running_start_ms"].as_f64(),
+        boundary_offset_ms: video["boundary_offset_ms"].as_f64(),
+        gpu_sched_class: video["gpu_sched_class"].as_i64(),
         debug: v["debug"].as_bool(),
         gamma: v["display"]["gamma"].as_f64().map(|g| g as f32),
         color: ["brightness", "contrast", "saturation", "sharpening"].map(|k| v["display"][k].as_f64().unwrap_or(0.0) as f32),

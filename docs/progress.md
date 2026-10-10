@@ -219,3 +219,18 @@ Built and run on the 5090 PC itself (`build.ps1` from a fresh clone). Not re-run
 2026-10-08 (after the code review above, laptop builder, mock client, loopback = TCP): `python3 harness/run.py all` -> **19/19 PASS** (the 17 below + e2e_avp_late_views, e2e_heavy_app_async); optional e2e_heavy_app_sync PASS (65.4 fps, diagnostic). Package rebuilt before the run. Not covered: real AVP, UDP stream, 5090, split encode, audio samples reaching a client.
 
 Previous: 2026-10-08 (laptop builder, mock client, loopback): `python3 harness/run.py all` -> **17/17 PASS** (client_no_host, e2e_app_lifecycle, e2e_baseline, e2e_daemon_reconnect, e2e_green_idle, e2e_installed_layout, e2e_layers, e2e_live_nvenc, e2e_live_nvenc_fullres, e2e_loopback_hevc10, e2e_openxr_foveated, e2e_openxr_input, e2e_openxr_probe, e2e_qpmap_foveated_mild, e2e_qpmap_off, e2e_qpmap_on, e2e_stale_cache). Late fixes in that run: frame timestamps are kept monotonic across green and app frames (green frames are stamped 50 ms behind the freshest tracking sample, never behind the last frame sent); the single-tick display-clock maximum threshold is 40 ms (isolated 18-31 ms ticks occur on the laptop under load; p99 limit stays 12.5 ms and `vsync_late` events log each one); `e2e_qpmap_foveated_mild` has no pacing thresholds because that layout is encode-bound (~13 ms) on the 1-engine laptop. Not covered: real AVP, 5090, split encode, game audio (not implemented).
+
+2026-10-10 (evening, branch `redesign` from `e0aff59`; today's pacing experiments kept on `exp/pacing-20261010`, none of them helped):
+**staged host pipeline + shim running start** (unbuilt on the PC, type-checked for Windows from WSL with `tools/wsl/`). The host's
+single loop (IPC wait -> synchronous NVENC encode p95 12 ms -> send -> stats, normal priority) is replaced by threads with one-deep
+newest-wins buffers (`tools/host/src/pipeline.rs`): intake (IPC frame -> mailbox, slot marked busy for the shim), the vsync/clock
+thread picks the newest complete frame at each compositor boundary, an encoder thread encodes it (green idle frame when no app),
+a sender thread releases packets `asap` | `vsync` (next tick) | `phase` (boundary + encode-time envelope, default). Empty
+boundaries are left empty (the headset re-presents, as with SteamVR's compositor). The shim (`ovrshim/driver.cpp`) gets SteamVR's
+WaitGetPoses / Meta Phase Sync behaviour: `ovr_WaitToBeginFrame` releases the game `appFrameMs` (envelope of release -> GPU-complete)
++ `running_start_ms` (2) before the next boundary, one release per boundary, GPU throttle (<= 1 frame in flight) kept; ring 4 -> 6
+slots with host-side ownership (`slotBusyMask`, IPC v12) so threads never read a slot the game renders into. Realtime GPU scheduling
+class requested (`gpu_sched_class` 5, needs an elevated host). Harness (`harness/live.py`) adapted to the new settings/KPIs.
+Audio checked: game audio is already captured on its own thread by ALVR's server_core (WASAPI loopback callback, sent as 10 ms
+batches on the shared stream socket); nothing to add in the host, stutter causes would be the client's 50 ms buffer policy and the
+shared socket, not a missing thread.

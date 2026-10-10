@@ -14,8 +14,8 @@
 namespace visionalvr_ipc {
 
 constexpr uint32_t kMagic = 0x56414C31; // 'VAL1'
-constexpr uint32_t kVersion = 11;
-constexpr int kSlots = 4;
+constexpr uint32_t kVersion = 12;
+constexpr int kSlots = 6;   // SBS ring: the host holds up to 2 (newest + encoding), 2 may be in flight on the GPU
 
 struct Pose {
     float orientation[4]; // x y z w
@@ -72,6 +72,9 @@ struct HostToShim {
     float colorBrightness, colorContrast, colorSaturation, colorSharpening; // user colour correction (0 = neutral), on the final output
     uint32_t debugOn;              // 1: write the verbose shim log into debugDir
     wchar_t debugDir[260];         // the host's debug session folder (logs/debug/<time>), empty when debug is off
+    uint32_t slotBusyMask;         // bit i: the host holds ring slot i (newest published frame, or being read by its encoder): the shim never renders into it
+    float boundaryOffsetMs;        // the host's compositor boundary = display tick + this offset (ms)
+    float runningStartMs;          // > 0: WaitToBeginFrame releases the app appFrameMs + this margin before the next boundary (running start); 0: at the tick
 };
 
 struct Haptic {
@@ -96,6 +99,10 @@ struct ShimToHost {
     uint32_t tsMatched;            // frames whose timestamp was found by matching the layer's RenderPose to a pose the app read
     uint32_t tsFallback;           // frames stamped with the last pose the app read (no projection layer, or no pose matched)
     wchar_t appExe[128];           // file name of the app's executable (for the logs)
+    uint32_t slotBusyWaits;        // SubmitFrame had to wait for a free ring slot (host too slow, or a GPU hang)
+    float appFrameMs;              // envelope of release (WaitToBeginFrame return) -> frame GPU-complete: the running-start lead
+    uint64_t releases;             // WaitToBeginFrame releases
+    uint64_t releasesLate;         // releases whose computed time was already past (app slower than a display period: free-running)
 };
 
 struct IpcState {

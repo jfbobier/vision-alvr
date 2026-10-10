@@ -1,0 +1,14 @@
+#!/bin/bash
+# lib.exe stand-in for `cargo check` from WSL: cc-rs needs an archiver for the msvc target when it compiles the dependencies'
+# C code (ring, zstd, bzip2); the archive is never linked, so a GNU ar archive is enough.
+out=""; objs=()
+for a in "$@"; do
+  case "$a" in
+    [-/][oO][uU][tT]:*) out="${a#*:}";;
+    [-/]*) ;;
+    @*) while IFS= read -r l; do l="${l%$'\r'}"; l="${l#\"}"; l="${l%\"}"; [ -n "$l" ] && objs+=("$l"); done < "${a#@}";;
+    *) objs+=("$a");;
+  esac
+done
+[ -z "$out" ] && { echo "lib.exe stand-in: no -out:" >&2; exit 1; }
+exec ar crs "$out" "${objs[@]}"

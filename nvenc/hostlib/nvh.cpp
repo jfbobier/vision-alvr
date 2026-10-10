@@ -566,6 +566,31 @@ void nvh_ipc_shim_stats(void* i, uint32_t* submit_mode, uint32_t* ts_matched, ui
     *submit_mode = s.submitMode; *ts_matched = s.tsMatched; *ts_fallback = s.tsFallback;
 }
 
+void nvh_ipc_slot_busy(void* i, uint32_t slot, int busy) {
+    if (slot >= (uint32_t)visionalvr_ipc::kSlots) return;
+    auto* mask = (volatile LONG*)&((Ipc*)i)->state->host.slotBusyMask;
+    if (busy) InterlockedOr(mask, (LONG)(1u << slot)); else InterlockedAnd(mask, (LONG)~(1u << slot));
+}
+
+void nvh_ipc_set_pacing(void* i, float boundary_offset_ms, float running_start_ms) {
+    auto& h = ((Ipc*)i)->state->host;
+    h.boundaryOffsetMs = boundary_offset_ms; MemoryBarrier(); h.runningStartMs = running_start_ms;
+}
+
+void nvh_ipc_shim_pacing(void* i, uint32_t* slot_busy_waits, float* app_frame_ms, uint64_t* releases, uint64_t* releases_late) {
+    const auto& s = ((Ipc*)i)->state->shim;
+    *slot_busy_waits = s.slotBusyWaits; *app_frame_ms = s.appFrameMs; *releases = s.releases; *releases_late = s.releasesLate;
+}
+
+long nvh_set_gpu_scheduling(int cls) {
+    typedef long(APIENTRY * PFN)(HANDLE, int);
+    HMODULE gdi = LoadLibraryW(L"gdi32.dll");
+    if (!gdi) return -1;
+    PFN fn = (PFN)GetProcAddress(gdi, "D3DKMTSetProcessSchedulingPriorityClass");
+    if (!fn) return -2;
+    return fn(GetCurrentProcess(), std::max(0, std::min(5, cls)));
+}
+
 void nvh_ipc_close(void* i) { if (i) { visionalvr_ipc::CloseIpc(*(Ipc*)i); delete (Ipc*)i; } }
 
 int nvh_encoder_engines(void* hh) { auto* n = (Nvh*)hh; return n && n->enc ? n->enc->GetEncoderEngineCount() : 0; }

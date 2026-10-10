@@ -399,6 +399,7 @@ namespace {
                         }
                         m_vsyncInterval = interval;
                         m_nextFramePredictedDisplayTime = tick + interval + m_photonsTime;
+                        m_latestTickS = tick;
                         m_lastSignaledVsync++;
                         m_frameVsync.notify_all();
                     }
@@ -676,12 +677,64 @@ namespace {
                                        "HostDriver_WaitForVsync_DirectModeComponent",
                                        TLArg(m_lastSignaledVsync, "LastSignaledVsync"));
 
-                // TODO: If the app fell behind, we shouldn't be waiting here.
-                const auto lastSignaledVsync = m_lastSignaledVsync;
-                if (!m_frameVsync.wait_for(lock, 100ms, [&]() { return m_lastSignaledVsync > lastSignaledVsync; })) {
-                    m_waitTimeouts++;
+                const float marginMs = m_ipc.state ? m_ipc.state->host.runningStartMs : 0.f;
+                if (marginMs > 0.f && m_latestTickS > 0 && m_vsyncInterval > 0) {
+                    // Running start (SteamVR's WaitGetPoses, Meta's Phase Sync): release the app so that its frame (release ->
+                    // composed and GPU-complete, the envelope m_appTimeS) lands this margin before the host's next compositor
+                    // boundary, one release per boundary. An app slower than a display period is released at once and free-runs:
+                    // the host picks whatever frame is complete at each boundary and the headset repeats on the empty ones.
+                    const double period = m_vsyncInterval;
+                    const double offset = m_ipc.state->host.boundaryOffsetMs * 0.001;
+                    const double lead = m_appTimeS.load() + marginMs * 0.001;
+                    if (m_lastTargetBoundary == 0) {
+                        m_lastTargetBoundary = m_lastSignaledVsync;
+                    }
+                    // boundary j (counted in host ticks) is at m_latestTickS + (j - m_lastSignaledVsync) * period + offset
+                    auto boundaryTime = [&](long long j) {
+                        return m_latestTickS + (double)(j - m_lastSignaledVsync) * period + offset;
+                    };
+                    long long target = m_lastTargetBoundary + 1;
+                    double now = QpcSeconds();
+                    while (boundaryTime(target) - lead < now - period) {
+                        target++; // far behind (paused app, very long frame): skip boundaries more than a period in the past
+                    }
+                    const double plannedRelease = boundaryTime(target) - lead;
+                    for (;;) {
+                        now = QpcSeconds();
+                        const double releaseAt = boundaryTime(target) - lead; // ticks arriving meanwhile refine the grid
+                        if (releaseAt <= now) {
+                            break;
+                        }
+                        const auto waitFor = std::chrono::duration_cast<std::chrono::steady_clock::duration>(
+                            std::chrono::duration<double>(std::min(releaseAt - now, 0.1)));
+                        m_frameVsync.wait_until(lock, std::chrono::steady_clock::now() + waitFor);
+                    }
+                    m_lastTargetBoundary = target;
+                    if (plannedRelease < now - 0.0005) {
+                        m_releasesLate++;
+                    }
+                } else {
+                    // no running start: release at the host's next display tick
+                    const auto lastSignaledVsync = m_lastSignaledVsync;
+                    if (!m_frameVsync.wait_for(lock, 100ms, [&]() { return m_lastSignaledVsync > lastSignaledVsync; })) {
+                        m_waitTimeouts++;
+                    }
                 }
+                m_releases++;
                 m_waitWaited++;
+                lock.unlock();
+                {
+                    // GPU throttle, like a real runtime (and SteamVR's WaitGetPoses): the app may start a new frame only when at
+                    // most one of its submitted frames is still completing on the GPU. Without it a GPU-bound app runs several
+                    // frames ahead, its frames then complete in bunches (two in one display period, then none) and the stream
+                    // skips and repeats instead of showing one frame per period.
+                    std::unique_lock plock(m_publishMutex);
+                    if (!m_publishCv.wait_for(plock, 50ms, [&] { return m_publishQueue.size() <= 1; })) {
+                        m_gpuThrottleTimeouts++;
+                    }
+                }
+                lock.lock();
+                m_lastReleaseS = QpcSeconds();
                 m_lastWaitedFrame = std::max(m_lastWaitedFrame, frameIndex);
 
                 TraceLoggingWriteStop(wait,
@@ -1056,7 +1109,7 @@ namespace {
 
             if (m_ipc.state && m_sbsWidth) {
                 const double composeStart = QpcSeconds();
-                const uint32_t slot = (uint32_t)(m_framesSubmitted % visionalvr_ipc::kSlots);
+                const uint32_t slot = PickSlot();
                 int composed = 0;
                 for (const ovrLayerHeader* h : layers) {
                     composed += IsComposedLayerType(h) ? 1 : 0;
@@ -1086,6 +1139,12 @@ namespace {
                             st.lastComposeMs, composed, st.tsMatched, (unsigned long long)m_tsByDisplayTime, st.tsFallback,
                             m_lastSignaledVsync, (unsigned long long)m_waitCalls, (unsigned long long)m_waitWaited,
                             (unsigned long long)m_waitRepeatedIndex, (unsigned long long)m_waitTimeouts);
+                    ShimLog("pacing: running start %s (margin %.1f ms, boundary offset %.1f ms), app time envelope %.2f ms, releases %llu "
+                            "(late %llu), GPU throttle timeouts %llu, slot waits %llu, host busy mask 0x%x",
+                            m_ipc.state->host.runningStartMs > 0.f ? "on" : "off", m_ipc.state->host.runningStartMs,
+                            m_ipc.state->host.boundaryOffsetMs, m_appTimeS.load() * 1000.0, (unsigned long long)m_releases.load(),
+                            (unsigned long long)m_releasesLate.load(), (unsigned long long)m_gpuThrottleTimeouts,
+                            (unsigned long long)m_slotBusyWaits.load(), (unsigned)m_ipc.state->host.slotBusyMask);
                     auto pct = [](std::vector<float>& v, double q) {
                         if (v.empty()) {
                             return 0.0f;
@@ -1122,13 +1181,13 @@ namespace {
                         WaitGpuIdleSpin();
                         SetEvent(m_gpuDone[slot]);
                     }
-                    m_publishQueue.push_back({slot, clientTs, composeStart});
+                    m_publishQueue.push_back({slot, clientTs, composeStart, m_lastReleaseS.load()});
                     lock.unlock();
                     m_publishCv.notify_all();
                 } else {
                     // OVRSHIM_SYNC_SUBMIT=1: wait for the GPU on the app thread (previous behaviour, kill switch)
                     WaitGpuIdleSpin();
-                    PublishFrame(slot, clientTs, composeStart);
+                    PublishFrame(slot, clientTs, composeStart, m_lastReleaseS.load());
                 }
             }
 
@@ -1167,9 +1226,23 @@ namespace {
 
         // Hands a composed (GPU-complete) slot to the host. Called by exactly one thread at a time: the publisher thread, or the
         // app thread when there is no publisher.
-        void PublishFrame(uint32_t slot, uint64_t clientTs, double composeStart) {
+        void PublishFrame(uint32_t slot, uint64_t clientTs, double composeStart, double releaseS) {
             auto& s = m_ipc.state->shim;
-            s.lastComposeMs = (float)((QpcSeconds() - composeStart) * 1000.0);
+            const double nowS = QpcSeconds();
+            s.lastComposeMs = (float)((nowS - composeStart) * 1000.0);
+            if (releaseS > 0 && nowS > releaseS) {
+                // Running-start lead: envelope of release -> GPU-complete. Fast attack, slow decay (0.1 ms per frame: a long frame
+                // is forgotten within about a second), kept within [1 ms, 100 ms].
+                const double sample = nowS - releaseS;
+                double est = std::max(sample, m_appTimeS.load() - 0.0001);
+                est = std::min(std::max(est, 0.001), 0.1);
+                m_appTimeS = est;
+                s.appFrameMs = (float)(est * 1000.0);
+            }
+            m_lastPublishedSlot = slot;
+            s.slotBusyWaits = (uint32_t)m_slotBusyWaits.load();
+            s.releases = m_releases.load();
+            s.releasesLate = m_releasesLate.load();
             s.frameSeq++; // odd: the host re-reads until it sees the same even value before and after
             MemoryBarrier();
             s.frameSlot = slot;
@@ -1179,6 +1252,39 @@ namespace {
             MemoryBarrier();
             s.frameSeq++; // even: stable
             SetEvent(m_ipc.frame);
+        }
+
+        // Ring slot for the next frame: never one the host holds (slotBusyMask: its newest frame, or the one its encoder reads),
+        // nor one still in flight on the GPU (publish queue), nor the last one published (the host's intake may take it at any
+        // moment). Round-robin otherwise. With every slot excluded (not expected with 6 slots), wait for one, 50 ms at most.
+        uint32_t PickSlot() {
+            std::unique_lock lock(m_publishMutex);
+            for (int attempt = 0; attempt < 26; attempt++) {
+                const uint32_t busy = m_ipc.state ? *(volatile uint32_t*)&m_ipc.state->host.slotBusyMask : 0;
+                const uint32_t lastPublished = m_lastPublishedSlot.load();
+                for (int i = 0; i < visionalvr_ipc::kSlots; i++) {
+                    const uint32_t s = (m_nextSlot + i) % visionalvr_ipc::kSlots;
+                    if ((busy & (1u << s)) || s == lastPublished) {
+                        continue;
+                    }
+                    bool inFlight = false;
+                    for (const auto& p : m_publishQueue) {
+                        inFlight |= p.slot == s;
+                    }
+                    if (inFlight) {
+                        continue;
+                    }
+                    m_nextSlot = (s + 1) % visionalvr_ipc::kSlots;
+                    return s;
+                }
+                if (attempt == 0) {
+                    m_slotBusyWaits++;
+                }
+                m_publishCv.wait_for(lock, std::chrono::milliseconds(2));
+            }
+            const uint32_t s = m_nextSlot;
+            m_nextSlot = (s + 1) % visionalvr_ipc::kSlots;
+            return s;
         }
 
         void StartPublisher() {
@@ -1207,7 +1313,7 @@ namespace {
                         }
                         // same 50 ms cap as the spin wait: a hung GPU must not stall the stream forever
                         WaitForSingleObject(m_gpuDone[f.slot], 50);
-                        PublishFrame(f.slot, f.clientTs, f.composeStart);
+                        PublishFrame(f.slot, f.clientTs, f.composeStart, f.releaseS);
                         {
                             std::unique_lock lock(m_publishMutex);
                             m_publishQueue.pop_front();
@@ -1875,6 +1981,15 @@ namespace {
         mutable std::atomic<uint64_t> m_lastPoseClientTsNs{0};
         uint64_t m_framesPublished{0}; // frames handed to the host (frameCounter)
         uint64_t m_framesSubmitted{0}; // frames composed (picks the ring slot)
+        // Running start (see WaitForVsync): the app is released appTime + margin before the host's next compositor boundary.
+        std::atomic<double> m_lastReleaseS{0.0};   // shim clock when WaitForVsync last released the app
+        std::atomic<double> m_appTimeS{0.004};     // envelope of release -> frame GPU-complete (published), seconds
+        long long m_lastTargetBoundary{0};         // boundary (tick index) the last release aimed at: one release per boundary
+        double m_latestTickS{0.0};                 // shim-clock time of the host's latest display tick (under m_frameMutex)
+        std::atomic<uint64_t> m_releases{0}, m_releasesLate{0}, m_slotBusyWaits{0};
+        uint64_t m_gpuThrottleTimeouts{0};
+        uint32_t m_nextSlot{0};                    // round-robin position of PickSlot
+        std::atomic<uint32_t> m_lastPublishedSlot{0xFFFFFFFFu};
         // head poses the app read, with their client timestamps (guarded by m_lastHeadMutex)
         struct PoseSample {
             uint64_t clientTsNs;
@@ -1900,6 +2015,7 @@ namespace {
             uint32_t slot;
             uint64_t clientTs;
             double composeStart;
+            double releaseS; // when WaitForVsync released the app for this frame (running-start envelope)
         };
         ComPtr<IDXGIDevice2> m_dxgiDevice2;
         HANDLE m_gpuDone[visionalvr_ipc::kSlots]{};

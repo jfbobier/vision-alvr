@@ -66,6 +66,16 @@ double nvh_encode_shared(void* nvh, void* ipc, uint32_t slot, uint32_t frame_no,
 void nvh_release_shared(void* nvh);
 // Shim diagnostics: submit mode (0 GPU wait on the app thread, 1 publisher thread) and how frame timestamps were chosen.
 void nvh_ipc_shim_stats(void* ipc, uint32_t* submit_mode, uint32_t* ts_matched, uint32_t* ts_fallback);
+// Ring-slot ownership (ipc.h slotBusyMask): set while the host holds a slot (newest published frame, or being read by the encoder).
+void nvh_ipc_slot_busy(void* ipc, uint32_t slot, int busy);
+// Compositor pacing shared with the shim: boundary offset after the display tick, running-start margin (0 = release at the tick).
+void nvh_ipc_set_pacing(void* ipc, float boundary_offset_ms, float running_start_ms);
+// Shim pacing diagnostics (see ipc.h ShimToHost).
+void nvh_ipc_shim_pacing(void* ipc, uint32_t* slot_busy_waits, float* app_frame_ms, uint64_t* releases, uint64_t* releases_late);
+// Process-wide GPU scheduling class (D3DKMT): 0 idle .. 4 high, 5 realtime (needs the increase-base-priority privilege, i.e. an
+// elevated host). SteamVR's compositor runs realtime, so its copy/encode never queues behind the game's GPU work. Returns the
+// NTSTATUS (0 = success).
+long nvh_set_gpu_scheduling(int cls);
 void nvh_ipc_close(void* ipc);
 // The user's display gamma and the debug session folder (UTF-16, may be null) for the shim.
 void nvh_ipc_set_user(void* ipc, float user_gamma, int debug_on, const wchar_t* debug_dir);
