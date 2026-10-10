@@ -1,0 +1,102 @@
+{
+  "description": "PACING LAB: the steady app with sends as soon as encoded (the delta the phase pacing buys).",
+  "topology": {
+    "host": "builder",
+    "client": "builder",
+    "client_bind_ip": "127.0.0.2",
+    "host_launch": "interactive"
+  },
+  "session_overrides": {
+    "session_settings.video.foveated_encoding.enabled": false,
+    "openvr_config.enable_foveated_encoding": false,
+    "openvr_config.eye_resolution_width": 1760,
+    "openvr_config.eye_resolution_height": 1600,
+    "openvr_config.target_eye_resolution_width": 1760,
+    "openvr_config.target_eye_resolution_height": 1600,
+    "session_settings.connection.client_recv_buffer_bytes": {
+      "variant": "Custom",
+      "Custom": 16777216
+    },
+    "session_settings.connection.server_send_buffer_bytes": {
+      "variant": "Custom",
+      "Custom": 16777216
+    },
+    "session_settings.video.transcoding_view_resolution": {
+      "Scale": 1.0,
+      "Absolute": {
+        "width": 1760,
+        "height": {
+          "set": true,
+          "content": 1600
+        }
+      },
+      "variant": "Absolute"
+    },
+    "session_settings.video.emulated_headset_view_resolution": {
+      "Scale": 1.0,
+      "Absolute": {
+        "width": 1760,
+        "height": {
+          "set": true,
+          "content": 1600
+        }
+      },
+      "variant": "Absolute"
+    }
+  },
+  "host": {
+    "shim": true,
+    "fps": 90,
+    "seconds": 50,
+    "connect_timeout": 45,
+    "gpu_keepalive": 90,
+    "exit_after_frames": 2000,
+    "send_pacing": "asap",
+    "running_start_ms": 2.0,
+    "gpu_sched_class": 5
+  },
+  "client": {
+    "seconds": 55,
+    "connect_timeout": 45,
+    "yaw_amp": 0.5,
+    "yaw_hz": 0.25,
+    "display_sim": true,
+    "poll_ms": 5,
+    "queue_max": 2,
+    "motion": "yaw"
+  },
+  "client_env": {
+    "RUST_LOG": "warn"
+  },
+  "app": {
+    "frames": 1800,
+    "timeout_s": 60,
+    "env": {
+      "XR_PROBE_CPU_MS": "3",
+      "XR_PROBE_GPU_COPIES": "20",
+      "XR_PROBE_LOAD": "steady"
+    }
+  },
+  "gpu_sample": true,
+  "timeout_s": 200,
+  "checks": {
+    "host_min_frames": 600,
+    "client_min_frames": 600,
+    "display": {
+      "max_repeat_pct": 5.0,
+      "max_skip_pct": 5.0,
+      "max_dwell_spread_ms": 4.0,
+      "min_fps": 85,
+      "max_repeat_run": 2
+    },
+    "pipeline": {
+      "max_superseded_frac": 0.03,
+      "max_encoder_overruns": 5,
+      "max_send_late": 20
+    },
+    "app_timing": {
+      "min_fps": 85,
+      "max_release_p95_ms": 12.5
+    }
+  }
+}

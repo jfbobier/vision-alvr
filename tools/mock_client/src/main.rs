@@ -17,6 +17,7 @@ use alvr_common::{
 use alvr_packets::{ButtonEntry, ButtonValue, FaceData};
 use serde_json::json;
 use std::{
+    collections::VecDeque,
     collections::HashMap,
     fs::File,
     io::Write,
@@ -45,6 +46,19 @@ struct Args {
     controllers_csv: Option<String>,
     views_after_first_frame: bool,
     encoding_gamma: f32,
+    /// Vision Pro display emulation: a display tick at `refresh` Hz with the visionOS client's frame rule (poll the decoded
+    /// queue up to poll_ms, re-present the last frame otherwise, queue capped at queue_max), tracking once per tick with the
+    /// next presentation time as timestamp, ALVR client statistics reported from the emulated display (not at arrival)
+    display_sim: bool,
+    poll_ms: f64,
+    queue_max: usize,
+    display_csv: Option<String>,
+    /// head motion profile: yaw (sine, default) | still | turn (constant yaw rate) | nod (pitch sine)
+    motion: String,
+    /// orientation noise added to every sample (millidegrees, uniform), models tracking jitter
+    noise_mdeg: f32,
+    /// > 0: every other tracking sample is held and sent together with the next one (Wi-Fi bunching)
+    bunch: bool,
 }
 
 fn parse_args() -> Result<Args, String> {
@@ -68,6 +82,13 @@ fn parse_args() -> Result<Args, String> {
         controllers: false,
         controllers_csv: None,
         views_after_first_frame: false,
+        display_sim: false,
+        poll_ms: 5.0,
+        queue_max: 2,
+        display_csv: None,
+        motion: "yaw".into(),
+        noise_mdeg: 0.0,
+        bunch: false,
         encoding_gamma: 1.0,
     };
     let mut it = std::env::args().skip(1);
@@ -97,6 +118,13 @@ fn parse_args() -> Result<Args, String> {
             // the visionOS client asks for 1.5 (ALVR uses it unless the session sets server_overrides_encoding_gamma)
             "--encoding-gamma" => a.encoding_gamma = v()?.parse().map_err(|e| format!("{e}"))?,
             "--controllers-csv" => a.controllers_csv = Some(v()?),
+            "--display-sim" => a.display_sim = true,
+            "--poll-ms" => a.poll_ms = v()?.parse().map_err(|e| format!("{e}"))?,
+            "--queue-max" => a.queue_max = v()?.parse().map_err(|e| format!("{e}"))?,
+            "--display-csv" => a.display_csv = Some(v()?),
+            "--motion" => a.motion = v()?,
+            "--noise-mdeg" => a.noise_mdeg = v()?.parse().map_err(|e| format!("{e}"))?,
+            "--bunch" => a.bunch = true,
             "--no-10bit" => a.prefer_10bit = false,
             "--no-foveation" => a.foveated = false,
             other => return Err(format!("unknown argument {other}")),
@@ -112,9 +140,27 @@ struct FrameRec {
     yaw: Option<f32>,
 }
 
+/// A decoded frame waiting for the emulated display.
+struct Queued {
+    ts: Duration,
+    decoded_at: Instant,
+}
+
+/// One emulated display tick.
+struct DisplayRec {
+    tick_ns: u128,
+    shown_ts_ns: u128,
+    repeat: bool,
+    dwell_ms: f64,
+    queue_len: usize,
+}
+
 #[derive(Default)]
 struct Shared {
     sent_yaw: HashMap<u128, f32>,
+    queue: VecDeque<Queued>,
+    dropped: usize,
+    display: Vec<DisplayRec>,
     poses_sent: usize,
     frames: Vec<FrameRec>,
     bytes: usize,
@@ -195,7 +241,13 @@ fn main() {
                     let (amp, hz, h) = (args.yaw_amp, args.yaw_hz, args.height);
                     let controllers = args.controllers;
                     let late_views = args.views_after_first_frame;
-                    tracking_thread = Some(thread::spawn(move || tracking(c, s, sh, origin, fps, amp, hz, h, controllers, late_views)));
+                    let motion = Motion { profile: args.motion.clone(), amp, hz, height: h, noise_mdeg: args.noise_mdeg };
+                    if args.display_sim {
+                        let (poll, bunch) = (args.poll_ms, args.bunch);
+                        tracking_thread = Some(thread::spawn(move || display(c, s, sh, origin, fps, motion, poll, bunch, late_views)));
+                    } else {
+                        tracking_thread = Some(thread::spawn(move || tracking(c, s, sh, origin, fps, motion, controllers, late_views)));
+                    }
                 }
                 ClientCoreEvent::StreamingStopped => {
                     event(origin, "streaming_stopped", json!(null));
@@ -215,6 +267,7 @@ fn main() {
                     }
                     let weak: Weak<ClientCoreContext> = Arc::downgrade(&ctx);
                     let (sh, of, decode_ms) = (Arc::clone(&shared), out_file.clone(), args.decode_ms);
+                    let (display_sim, queue_max) = (args.display_sim, args.queue_max);
                     ctx.set_decoder_input_callback(Box::new(move |ts, data| {
                         let arrival = origin.elapsed();
                         if let Some(f) = &of {
@@ -229,8 +282,18 @@ fn main() {
                         if let Some(c) = weak.upgrade() {
                             thread::sleep(Duration::from_millis(decode_ms));
                             c.report_frame_decoded(ts);
-                            c.report_compositor_start(ts);
-                            c.report_submit(ts, Duration::from_millis(1));
+                            if display_sim {
+                                // like the visionOS client: decoded frames queue for the display thread, oldest dropped past the cap
+                                let mut s = sh.lock();
+                                s.queue.push_back(Queued { ts, decoded_at: Instant::now() });
+                                while s.queue.len() > queue_max {
+                                    s.queue.pop_front();
+                                    s.dropped += 1;
+                                }
+                            } else {
+                                c.report_compositor_start(ts);
+                                c.report_submit(ts, Duration::from_millis(1));
+                            }
                         }
                         true
                     }));
@@ -301,6 +364,7 @@ fn main() {
         "poses_sent": s.poses_sent,
         "total_pipeline_latency_ms": pipeline_latency_ms,
         "views_after_first_frame": args.views_after_first_frame,
+        "display": if args.display_sim { display_report(&s, 1000.0 / args.refresh as f64) } else { serde_json::Value::Null },
         "views_sent_at_ms": s.views_sent_at_ms,
         "haptics": {
             "count": s.haptics.len(),
@@ -319,6 +383,13 @@ fn main() {
     if let Some(p) = &args.report {
         std::fs::write(p, serde_json::to_string_pretty(&report).unwrap()).ok();
     }
+    if let Some(p) = &args.display_csv {
+        let mut f = File::create(p).expect("create --display-csv");
+        writeln!(f, "tick_ns,shown_ts_ns,repeat,dwell_ms,queue_len").ok();
+        for r in &s.display {
+            writeln!(f, "{},{},{},{:.3},{}", r.tick_ns, r.shown_ts_ns, r.repeat as u8, r.dwell_ms, r.queue_len).ok();
+        }
+    }
     if let Some(p) = &args.frames_csv {
         let mut f = File::create(p).expect("create --frames-csv");
         writeln!(f, "ts_ns,arrival_ns,len,yaw").ok();
@@ -330,6 +401,148 @@ fn main() {
     std::process::exit(if !stream_started { 2 } else if pass { 0 } else { 1 });
 }
 
+#[derive(Clone)]
+struct Motion {
+    profile: String,
+    amp: f32,
+    hz: f32,
+    height: f32,
+    noise_mdeg: f32,
+}
+
+impl Motion {
+    /// Head pose at time `t` (seconds): the yaw the harness compares with what the app saw, and the full orientation.
+    fn pose(&self, t: f32, seed: u64) -> (f32, Quat) {
+        use std::f32::consts::TAU;
+        let (yaw, pitch) = match self.profile.as_str() {
+            "still" => (0.0, 0.0),
+            "turn" => ((self.amp * t) % TAU, 0.0), // constant yaw rate amp rad/s (a slow look-around)
+            "nod" => (0.0, self.amp * (TAU * self.hz * t).sin()),
+            _ => (self.amp * (TAU * self.hz * t).sin(), 0.0),
+        };
+        let mut q = Quat::from_rotation_y(yaw) * Quat::from_rotation_x(pitch);
+        if self.noise_mdeg > 0.0 {
+            // deterministic uniform noise (xorshift) so runs are reproducible
+            let mut x = seed.wrapping_mul(0x9E3779B97F4A7C15) ^ 0xD1B54A32D192ED03;
+            let mut r = || { x ^= x << 13; x ^= x >> 7; x ^= x << 17; (x >> 11) as f32 / (1u64 << 53) as f32 * 2.0 - 1.0 };
+            let n = self.noise_mdeg.to_radians() / 1000.0;
+            q = Quat::from_euler(alvr_common::glam::EulerRot::YXZ, r() * n, r() * n, r() * n) * q;
+        }
+        (yaw, q.normalize())
+    }
+}
+
+fn head_motion(m: &Motion, ts: Duration, seed: u64) -> (f32, DeviceMotion) {
+    let (yaw, q) = m.pose(ts.as_secs_f32(), seed);
+    (yaw, DeviceMotion { pose: Pose { orientation: q, position: Vec3::new(0.0, m.height, 0.0) }, linear_velocity: Vec3::ZERO, angular_velocity: Vec3::ZERO })
+}
+
+/// Vision Pro display emulation (see Args::display_sim). One thread: at every display tick it sends the tracking sample for
+/// the next presentation (what the visionOS client does once per display frame) and picks the frame to show with the client's
+/// rule (poll the decoded queue up to poll_ms, else re-present the last frame), reporting ALVR's client statistics from that.
+#[allow(clippy::too_many_arguments)]
+fn display(
+    ctx: Arc<ClientCoreContext>,
+    streaming: Arc<RelaxedAtomic>,
+    shared: Arc<Mutex<Shared>>,
+    origin: Instant,
+    fps: f32,
+    motion: Motion,
+    poll_ms: f64,
+    bunch: bool,
+    late_views: bool,
+) {
+    let period = Duration::from_secs_f64(1.0 / fps as f64);
+    let vp = ViewParams { pose: Pose::default(), fov: Fov { left: -1.0, right: 1.0, up: 1.0, down: -1.0 } };
+    let mut views_sent = false;
+    let mut tick = Instant::now();
+    let mut tick_idx = 0u64;
+    let mut last_shown: Option<Duration> = None;
+    let mut held: Option<(Duration, DeviceMotion, f32)> = None;
+    let face = || FaceData { eye_gazes: [None, None], fb_face_expression: None, htc_eye_expression: None, htc_lip_expression: None };
+    while streaming.value() {
+        // tracking for the frame that will be presented at the next tick
+        if !views_sent && (!late_views || !shared.lock().frames.is_empty()) {
+            ctx.send_view_params([vp, vp]);
+            views_sent = true;
+            shared.lock().views_sent_at_ms = Some(origin.elapsed().as_secs_f64() * 1000.0);
+        }
+        let target = tick.duration_since(origin) + period;
+        let (yaw, m) = head_motion(&motion, target, tick_idx);
+        {
+            let mut s = shared.lock();
+            s.sent_yaw.insert(target.as_nanos(), yaw);
+            s.poses_sent += 1;
+        }
+        if bunch && tick_idx % 2 == 1 {
+            held = Some((target, m, yaw)); // sent with the next sample: two packets back to back, then a gap
+        } else {
+            if let Some((hts, hm, _)) = held.take() {
+                ctx.send_tracking(hts, vec![(*HEAD_ID, hm)], [None, None], face());
+            }
+            ctx.send_tracking(target, vec![(*HEAD_ID, m)], [None, None], face());
+        }
+        // the frame for this tick: poll the decoded queue up to poll_ms
+        let deadline = tick + Duration::from_secs_f64(poll_ms / 1000.0);
+        let mut picked: Option<Queued> = None;
+        loop {
+            {
+                let mut s = shared.lock();
+                if let Some(q) = s.queue.pop_front() {
+                    picked = Some(q);
+                    break;
+                }
+            }
+            if Instant::now() >= deadline {
+                break;
+            }
+            thread::sleep(Duration::from_micros(200));
+        }
+        let now = Instant::now();
+        let queue_len = shared.lock().queue.len();
+        match picked {
+            Some(q) => {
+                let dwell = now.duration_since(q.decoded_at);
+                ctx.report_compositor_start(q.ts);
+                ctx.report_submit(q.ts, dwell);
+                last_shown = Some(q.ts);
+                shared.lock().display.push(DisplayRec { tick_ns: now.duration_since(origin).as_nanos(), shown_ts_ns: q.ts.as_nanos(), repeat: false, dwell_ms: dwell.as_secs_f64() * 1000.0, queue_len });
+            }
+            None => {
+                shared.lock().display.push(DisplayRec { tick_ns: now.duration_since(origin).as_nanos(), shown_ts_ns: last_shown.map(|t| t.as_nanos()).unwrap_or(0), repeat: true, dwell_ms: 0.0, queue_len });
+            }
+        }
+        tick += period;
+        tick_idx += 1;
+        thread::sleep(tick.saturating_duration_since(Instant::now()));
+    }
+}
+
+/// Repeats / skips / dwell of the emulated display: the headset-side numbers that separate a smooth stream from a juddering one.
+fn display_report(s: &Shared, period_ms: f64) -> serde_json::Value {
+    let d = &s.display;
+    let warm = d.len().min(90);
+    let d = &d[warm..];
+    let shown: Vec<&DisplayRec> = d.iter().filter(|r| !r.repeat).collect();
+    let repeats = d.iter().filter(|r| r.repeat && r.shown_ts_ns != 0).count();
+    let steps: Vec<f64> = shown.windows(2).map(|w| (w[1].shown_ts_ns as f64 - w[0].shown_ts_ns as f64) / 1e6 / period_ms).collect();
+    let skips = steps.iter().filter(|x| **x >= 1.5).count();
+    let mut dwell: Vec<f64> = shown.iter().map(|r| r.dwell_ms).collect();
+    dwell.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    let span_s = match (d.first(), d.last()) {
+        (Some(a), Some(b)) if d.len() > 1 => (b.tick_ns - a.tick_ns) as f64 / 1e9,
+        _ => 0.0,
+    };
+    json!({
+        "ticks": d.len(), "shown": shown.len(), "repeats": repeats, "repeat_pct": 100.0 * repeats as f64 / d.len().max(1) as f64,
+        "skips": skips, "skip_pct": 100.0 * skips as f64 / steps.len().max(1) as f64,
+        "dropped_in_queue": s.dropped,
+        "dwell_ms": { "p05": pct(&dwell, 0.05), "p50": pct(&dwell, 0.5), "p95": pct(&dwell, 0.95) },
+        "display_fps": if span_s > 0.0 { (d.len() as f64 - 1.0) / span_s } else { 0.0 },
+        "warmup_ticks_skipped": warm,
+    })
+}
+
 #[allow(clippy::too_many_arguments)]
 fn tracking(
     ctx: Arc<ClientCoreContext>,
@@ -337,9 +550,7 @@ fn tracking(
     shared: Arc<Mutex<Shared>>,
     origin: Instant,
     fps: f32,
-    amp: f32,
-    hz: f32,
-    height: f32,
+    motion: Motion,
     controllers: bool,
     late_views: bool,
 ) {
@@ -359,17 +570,10 @@ fn tracking(
             shared.lock().views_sent_at_ms = Some(origin.elapsed().as_secs_f64() * 1000.0);
         }
         let ts = origin.elapsed();
-        let yaw = amp * (2.0 * std::f32::consts::PI * hz * ts.as_secs_f32()).sin();
+        let (yaw, head) = head_motion(&motion, ts, ts.as_nanos() as u64);
         shared.lock().sent_yaw.insert(ts.as_nanos(), yaw);
         shared.lock().poses_sent += 1;
-        let mut motions = vec![(
-            *HEAD_ID,
-            DeviceMotion {
-                pose: Pose { orientation: Quat::from_rotation_y(yaw), position: Vec3::new(0.0, height, 0.0) },
-                linear_velocity: Vec3::ZERO,
-                angular_velocity: Vec3::ZERO,
-            },
-        )];
+        let mut motions = vec![(*HEAD_ID, head)];
         if controllers {
             // Scripted controllers, deterministic in time so the harness can compare what the app sees.
             let t = ts.as_secs_f32();

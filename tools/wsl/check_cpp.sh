@@ -26,10 +26,12 @@ nv = nv.replace(acc, acc + '\n    void* GetSessionHandle() const { return m_hEnc
 open(out + '/NvEncoder.h', 'w').write(nv)
 for f in ['NvEncoderD3D11.h', 'VideoEncoder.h']: shutil.copy(up + f, out)
 PY
-for f in nvh.cpp; do   # (bench.cpp: stb_image.h trips clang-cl on an MSVC intrinsic macro; unchanged third-party code)
+for f in nvh.cpp bench.cpp; do   # (STBI_NO_SIMD below: stb_image.h's cpuid probe trips clang-cl; MSVC builds it as is)
   echo "== nvenc/hostlib/$f"
-  clang-cl /std:c++17 /EHsc -fsyntax-only /DNOMINMAX -Wno-everything /I"$D/nvhinc" /I"$R/nvenc/shim122" /I"$R/nvenc/shim" /I"$R/nvenc/upstream" \
+  clang-cl /std:c++17 /EHsc -fsyntax-only /DNOMINMAX /DSTBI_NO_SIMD -Wno-everything /I"$D/nvhinc" /I"$R/nvenc/shim122" /I"$R/nvenc/shim" /I"$R/nvenc/upstream" \
     /I"$R/nvenc/upstream/platform/win32/d3d-render-utils" /I"$R/nvenc/upstream/platform/win32" /I"$R/nvenc" /I"$R/nvenc/hostlib" /I"$R/ovrshim" \
     /I"$R/third_party/stb" $W "$R/nvenc/hostlib/$f" || rc=1
 done
+echo "== tools/probe/xr_probe.cpp"
+clang-cl /std:c++17 /EHsc -fsyntax-only /DNOMINMAX /DSTBI_NO_SIMD -Wno-everything /I"$R/external/VDXR/external/OpenXR-SDK/include" /I"$R/nvenc/hostlib" /I"$R/third_party/stb" $W "$R/tools/probe/xr_probe.cpp" || rc=1
 echo "check_cpp: $([ $rc = 0 ] && echo OK || echo FAILED)"; exit $rc

@@ -242,3 +242,15 @@ listened for. ALVR's two discovery protocols are now carved into the host (`tool
 its own protocol id), and the daemon host browses mDNS alongside the stream so VisionALVR.exe shows "seen at <ip>" and keeps the
 paired address in step. The C# UDP listener is gone. `tools/wsl/check_gui.sh` compiles both GUIs from WSL (Roslyn via interop).
 Windows Firewall must allow alvr_host.exe on private networks (mDNS replies arrive on UDP 5353).
+
+2026-10-10 (evening, `redesign`): **pacing lab** for unattended iteration without the headset or a game (`python3 harness/run.py
+pacing`, scenarios in `harness/scenarios/pacing/`, loopback topology on the builder): the mock client emulates the Vision Pro
+display (`--display-sim`: 90 Hz tick, the visionOS client's frame rule = poll the decoded queue 5 ms then re-present, queue cap 2,
+one tracking sample per tick stamped with the next presentation time, ALVR client statistics reported from the emulated display)
+and reports repeats / skips / dwell, the numbers that separated SteamVR+ALVR (3.4 % repeats, dwell 9-11 ms) from us; motion
+profiles `yaw|still|turn|nod`, `--noise-mdeg`, `--bunch` (paired tracking packets). The probe app gets load patterns
+(`XR_PROBE_LOAD` steady|jitter|spikes|ramp|burst) and a per-frame timing CSV, and `XR_PROBE_SCENE=<.vab>` renders the Littlest
+Tokyo benchmark scene (room, animation) with the runtime's view poses: the scene renderer moved from bench.cpp into
+`nvenc/hostlib/bench_scene.h`, shared. New checks: `display`, `pipeline`, `app_timing`. The OpenXR-Simulator project the user
+found is a runtime (a VDXR stand-in), not an app, so it cannot sit in our chain; its probe is a BetterVR replay with less than ours.
+All of it compile-checked from WSL (`tools/wsl/check_cpp.sh`, cargo check of the mock client), not yet run on the PC.

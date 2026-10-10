@@ -3,6 +3,9 @@
 // layer_test=1 cycles through composition-layer phases of 90 frames each (see the phase table below).
 // Synthetic load (env): XR_PROBE_CPU_MS = busy CPU time per frame before rendering, XR_PROBE_GPU_COPIES = full copies of a
 // 4096x4096 RGBA16F texture per frame (GPU time), to model a heavy game (CPU and GPU work that only fit a frame when they overlap).
+// XR_PROBE_LOAD shapes both over time: steady (default) | jitter:<pct> (uniform +-pct per frame) | spikes:<every>:<factor> (every
+// n-th frame costs factor x) | ramp:<s> (0 -> 2x over s seconds, then back) | burst:<on_s>:<off_s> (full load / none alternating).
+// XR_PROBE_TIMING_CSV = per-frame timing (frame, t_wait_return_ms, t_end_ms, load_factor): the game side of the pacing analysis.
 // With input_csv it also reads Touch-profile input actions every frame (trigger/squeeze/buttons/thumbstick/grip pose) and
 // fires haptics on both hands periodically.
 // Each rendered frame stamps (frame_index+1) as 16 white/black 64x64 blocks in the top-left 1024x64 of the left eye
@@ -20,6 +23,14 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <string>
+#include <algorithm>
+// XR_PROBE_SCENE=<file.vab>: render the benchmark scene (Littlest Tokyo in its textured room, animated) instead of the flat stamp
+// background, with the runtime's view poses: a full OpenXR scene for the pacing lab without a game.
+#define STB_IMAGE_IMPLEMENTATION
+#define STBI_ONLY_PNG
+#define STBI_ONLY_JPEG
+#include "bench_scene.h"
 #include <vector>
 #define XR_USE_GRAPHICS_API_D3D11
 #define XR_USE_PLATFORM_WIN32
@@ -102,6 +113,19 @@ int main(int argc, char** argv) {
     if (FAILED(hr)) { L("FAIL D3D11CreateDevice 0x%08x", (unsigned)hr); return 1; }
     L("ok   D3D11CreateDevice");
 
+    Scene scene; bool sceneOn = false;
+    ID3D11DepthStencilView* sceneDsv[2] = {};
+    UINT sceneDsvW[2] = {}, sceneDsvH[2] = {};
+    if (const char* scenePath = getenv("XR_PROBE_SCENE")) {
+        std::string err;
+        sceneOn = LoadScene(dev, ctx, scenePath, scene, err);
+        if (sceneOn && !scene.room.count) MakeRoom(dev, scene);
+        L("scene %s: %s", scenePath, sceneOn ? "loaded" : err.c_str());
+    }
+    // the scene is normalised around the origin (~3 m); the benchmark looks at it from (0, 0.2, 1.9): put it where a standing
+    // viewer at the mock headset's height (1.5 m) sees the same picture
+    const XMMATRIX scenePlace = XMMatrixTranslation(0.f, 1.3f, -1.9f);
+
     XrGraphicsBindingD3D11KHR gb{ XR_TYPE_GRAPHICS_BINDING_D3D11_KHR }; gb.device = dev;
     XrSessionCreateInfo sci{ XR_TYPE_SESSION_CREATE_INFO }; sci.next = &gb; sci.systemId = sys;
     XrSession sess;
@@ -117,13 +141,27 @@ int main(int argc, char** argv) {
     // synthetic load (see the header)
     const double loadCpuMs = getenv("XR_PROBE_CPU_MS") ? atof(getenv("XR_PROBE_CPU_MS")) : 0.0;
     const int loadGpuCopies = getenv("XR_PROBE_GPU_COPIES") ? atoi(getenv("XR_PROBE_GPU_COPIES")) : 0;
+    // load pattern (see the header): a per-frame factor applied to both the CPU time and the GPU copies
+    std::string loadPattern = getenv("XR_PROBE_LOAD") ? getenv("XR_PROBE_LOAD") : "steady";
+    double lpA = 0, lpB = 0;
+    { size_t c1 = loadPattern.find(':'); if (c1 != std::string::npos) { lpA = atof(loadPattern.c_str() + c1 + 1); size_t c2 = loadPattern.find(':', c1 + 1); if (c2 != std::string::npos) lpB = atof(loadPattern.c_str() + c2 + 1); loadPattern = loadPattern.substr(0, c1); } }
+    uint64_t lpSeed = 0x9E3779B97F4A7C15ull;
+    auto loadFactor = [&](int frame, double tSec) -> double {
+        if (loadPattern == "jitter") { lpSeed ^= lpSeed << 13; lpSeed ^= lpSeed >> 7; lpSeed ^= lpSeed << 17; const double u = (double)(lpSeed >> 11) / 9007199254740992.0 * 2.0 - 1.0; return 1.0 + u * lpA / 100.0; }
+        if (loadPattern == "spikes") { const int every = (int)std::max(1.0, lpA); return (frame % every == every - 1) ? std::max(1.0, lpB) : 1.0; }
+        if (loadPattern == "ramp") { const double T = std::max(1.0, lpA); const double ph = fmod(tSec, 2 * T); return ph < T ? 1.0 + ph / T : 3.0 - ph / T; }
+        if (loadPattern == "burst") { const double on = std::max(0.1, lpA), off = std::max(0.1, lpB); return fmod(tSec, on + off) < on ? 1.0 : 0.0; }
+        return 1.0;
+    };
+    FILE* timingF = getenv("XR_PROBE_TIMING_CSV") ? fopen(getenv("XR_PROBE_TIMING_CSV"), "w") : nullptr;
+    if (timingF) fprintf(timingF, "frame,display_time_ns,t_wait_return_ms,t_end_ms,load_factor\n");
     ID3D11Texture2D* loadTex[2] = {};
     if (loadGpuCopies > 0) {
         D3D11_TEXTURE2D_DESC td{}; td.Width = td.Height = 4096; td.MipLevels = td.ArraySize = 1; td.Format = DXGI_FORMAT_R16G16B16A16_FLOAT;
         td.SampleDesc.Count = 1; td.Usage = D3D11_USAGE_DEFAULT; td.BindFlags = D3D11_BIND_RENDER_TARGET | D3D11_BIND_SHADER_RESOURCE;
         dev->CreateTexture2D(&td, nullptr, &loadTex[0]); dev->CreateTexture2D(&td, nullptr, &loadTex[1]);
     }
-    L("load cpu_ms=%.2f gpu_copies=%d", loadCpuMs, loadGpuCopies);
+    L("load cpu_ms=%.2f gpu_copies=%d pattern=%s (%.2f, %.2f)", loadCpuMs, loadGpuCopies, loadPattern.c_str(), lpA, lpB);
     LARGE_INTEGER qpf; QueryPerformanceFrequency(&qpf);
     auto qpcMs = [&] { LARGE_INTEGER t; QueryPerformanceCounter(&t); return (double)t.QuadPart * 1000.0 / (double)qpf.QuadPart; };
     double loopStartMs = 0;
@@ -257,8 +295,10 @@ int main(int argc, char** argv) {
         r = xrBeginFrame(sess, nullptr);
         if (XR_FAILED(r)) return fail("xrBeginFrame", r);
         if (done == 0) loopStartMs = qpcMs();
-        if (loadCpuMs > 0) { const double t = qpcMs(); while (qpcMs() - t < loadCpuMs) YieldProcessor(); }
-        if (loadTex[0] && loadTex[1]) for (int k = 0; k < loadGpuCopies; k++) ctx->CopyResource(loadTex[(k + 1) & 1], loadTex[k & 1]);
+        const double tWaitRet = qpcMs();
+        const double lf = loadFactor(done, (tWaitRet - loopStartMs) / 1000.0);
+        if (loadCpuMs > 0 && lf > 0) { const double t = qpcMs(); while (qpcMs() - t < loadCpuMs * lf) YieldProcessor(); }
+        if (loadTex[0] && loadTex[1]) { const int n = (int)(loadGpuCopies * lf + 0.5); for (int k = 0; k < n; k++) ctx->CopyResource(loadTex[(k + 1) & 1], loadTex[k & 1]); }
         if (inputF) {
             XrActiveActionSet act{ aset, XR_NULL_PATH }; XrActionsSyncInfo syn{ XR_TYPE_ACTIONS_SYNC_INFO }; syn.countActiveActionSets = 1; syn.activeActionSets = &act;
             xrSyncActions(sess, &syn);
@@ -303,6 +343,8 @@ int main(int argc, char** argv) {
                 fprintf(poseF, "%d,%.6f,%.5f,%.5f,%.5f,%lld\n", done + 1, yaw, views[0].pose.position.x, views[0].pose.position.y, views[0].pose.position.z, (long long)fs.predictedDisplayTime);
                 fflush(poseF);
             }
+            SceneFrame sceneFrame;
+            if (sceneOn) BeginSceneFrame(scene, ctx, (qpcMs() - loopStartMs) / 1000.0, sceneFrame, scenePlace);
             for (size_t i = 0; i < vcv.size(); i++) {
                 XrSwapchainImageAcquireInfo ai{ XR_TYPE_SWAPCHAIN_IMAGE_ACQUIRE_INFO }; uint32_t idx;
                 r = xrAcquireSwapchainImage(sc[i], &ai, &idx); if (XR_FAILED(r)) return fail("xrAcquireSwapchainImage", r);
@@ -314,7 +356,34 @@ int main(int argc, char** argv) {
                 if (SUCCEEDED(dev->CreateRenderTargetView(imgs[i][idx].texture, &rd, &rtv))) {
                     float bg[4] = { 0.02f, 0.02f, 0.02f + (i ? 0.1f : 0.f), 1 };
                     if (cubeTest && (done / 90) % 6 == 3) { bg[0] = bg[1] = bg[2] = bg[3] = 0.f; }   // cube phase: transparent, cube is drawn behind
-                    ctx->ClearRenderTargetView(rtv, bg);
+                    if (sceneOn && i < 2) {
+                        D3D11_TEXTURE2D_DESC td{}; imgs[i][idx].texture->GetDesc(&td);
+                        if (!sceneDsv[i] || sceneDsvW[i] != td.Width || sceneDsvH[i] != td.Height) {
+                            if (sceneDsv[i]) { sceneDsv[i]->Release(); sceneDsv[i] = nullptr; }
+                            D3D11_TEXTURE2D_DESC dd{}; dd.Width = td.Width; dd.Height = td.Height; dd.MipLevels = 1; dd.ArraySize = 1;
+                            dd.Format = DXGI_FORMAT_D32_FLOAT; dd.SampleDesc.Count = 1; dd.Usage = D3D11_USAGE_DEFAULT; dd.BindFlags = D3D11_BIND_DEPTH_STENCIL;
+                            ID3D11Texture2D* dt = nullptr;
+                            if (SUCCEEDED(dev->CreateTexture2D(&dd, nullptr, &dt))) { dev->CreateDepthStencilView(dt, nullptr, &sceneDsv[i]); dt->Release(); }
+                            sceneDsvW[i] = td.Width; sceneDsvH[i] = td.Height;
+                        }
+                        const float sky[4] = { 0.62f, 0.72f, 0.82f, 1 };
+                        ctx->ClearRenderTargetView(rtv, sky);
+                        if (sceneDsv[i]) {
+                            ctx->ClearDepthStencilView(sceneDsv[i], D3D11_CLEAR_DEPTH, 1, 0);
+                            ctx->OMSetRenderTargets(1, &rtv, sceneDsv[i]);
+                            const XrPosef& xp = views[i].pose; const XrFovf& xf = views[i].fov;
+                            const XMMATRIX pose = XMMatrixRotationQuaternion(XMVectorSet(xp.orientation.x, xp.orientation.y, xp.orientation.z, xp.orientation.w))
+                                                * XMMatrixTranslation(xp.position.x, xp.position.y, xp.position.z);
+                            const float tan4[4] = { -tanf(xf.angleLeft), tanf(xf.angleRight), tanf(xf.angleUp), -tanf(xf.angleDown) };
+                            const XMMATRIX vp = XMMatrixInverse(nullptr, pose) * Projection(tan4, 0.05f, 100.f);
+                            D3D11_VIEWPORT v{ 0, 0, (float)td.Width, (float)td.Height, 0, 1 };
+                            DrawSceneEye(scene, ctx, sceneFrame, v, vp, scenePlace);
+                            ID3D11RenderTargetView* none = nullptr;
+                            ctx->OMSetRenderTargets(1, &none, nullptr);
+                        }
+                    } else {
+                        ctx->ClearRenderTargetView(rtv, bg);
+                    }
                     ID3D11DeviceContext1* c1 = nullptr;
                     if (i == 0 && SUCCEEDED(ctx->QueryInterface(__uuidof(ID3D11DeviceContext1), (void**)&c1))) {
                         const uint32_t stamp = (uint32_t)(done + 1);
@@ -396,6 +465,7 @@ int main(int argc, char** argv) {
         fe.displayTime = fs.predictedDisplayTime; fe.environmentBlendMode = XR_ENVIRONMENT_BLEND_MODE_OPAQUE; fe.layerCount = nl; fe.layers = lay.data();
         r = xrEndFrame(sess, &fe);
         if (XR_FAILED(r)) return fail("xrEndFrame", r);
+        if (timingF) { fprintf(timingF, "%d,%lld,%.3f,%.3f,%.3f\n", done + 1, (long long)fs.predictedDisplayTime, tWaitRet, qpcMs(), lf); if (done % 30 == 0) fflush(timingF); }
         done++;
     }
     L("loop done: frames=%d ready=%d synchronized=%d", done, sawReady, sawSync);

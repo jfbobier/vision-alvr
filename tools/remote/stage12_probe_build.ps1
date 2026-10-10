@@ -1,4 +1,4 @@
-# Builds tools/probe/xr_probe.cpp -> build\probe\xr_probe.exe (no run).
+# Builds tools/probe/xr_probe.cpp -> build\probe\xr_probe.exe (no run). Includes nvenc\hostlib\bench_scene.h (XR_PROBE_SCENE) and stb_image.
 $ErrorActionPreference = 'Continue'
 $start = Get-Date
 $root = if ($env:VISIONALVR_ROOT) { $env:VISIONALVR_ROOT } else { "$env:USERPROFILE\openxr" }
@@ -11,7 +11,7 @@ $vcvars = 'C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Auxiliary\
 @echo off
 call "$vcvars" >nul
 cd /d "$bdir"
-cl /nologo /EHsc /MD /O2 /std:c++17 /I"$sdk" "$root\_tmp\xr_probe.cpp" /Fe:xr_probe.exe /link "$lib" d3d11.lib dxgi.lib advapi32.lib
+cl /nologo /EHsc /MD /O2 /std:c++17 /I"$sdk" /I"$root\nvenc\hostlib" /I"$root\third_party\stb" "$root\_tmp\xr_probe.cpp" /Fe:xr_probe.exe /link "$lib" d3d11.lib dxgi.lib d3dcompiler.lib advapi32.lib
 "@ | Set-Content -Encoding ASCII "$bdir\build.cmd"
 cmd /c "$bdir\build.cmd" 2>&1 | Out-File -Encoding utf8 "$root\logs\xr_probe_build.log"
 Get-Content "$root\logs\xr_probe_build.log" | Select-String -Pattern 'error|fatal' | Select-Object -First 10

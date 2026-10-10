@@ -184,7 +184,7 @@ def launch_app(app, rid, rd, log):
     rt = app.get("runtime", r"out\vdxr-shim")
     cmd = ("@echo off\r\n"
            f"set XR_RUNTIME_JSON={home}\\openxr\\{rt}\\virtualdesktop-openxr.json\r\n"
-           + "".join(f"set {k}={v}\r\n" for k, v in {"OVRSHIM_LOG": f"{home}\\openxr\\{rd}\\ovrshim.log", **app.get("env", {})}.items()) +
+           + "".join(f"set {k}={v}\r\n" for k, v in {"OVRSHIM_LOG": f"{home}\\openxr\\{rd}\\ovrshim.log", "XR_PROBE_TIMING_CSV": f"{home}\\openxr\\{rd}\\app_timing.csv", **app.get("env", {})}.items()) +
            f"cd /d {home}\\openxr\r\n"
            f"build\\probe\\xr_probe.exe {rd}\\app.log {app.get('frames', 300)} {app.get('timeout_s', 60)} {rd}\\app_pose.csv {(rd + chr(92) + 'app_input.csv') if app.get('input') else '-'}{(' ' + str(int(app['layer_test'])) if app.get('layer_test') else '')} > {rd}\\app_stdout.txt 2>&1\r\n"
            f"echo %ERRORLEVEL% > {rd}\\app.rc\r\n")
@@ -290,7 +290,9 @@ def run_scenario(sc, outdir: Path, log=print):
                                      "width": "--width", "height": "--height", "noise": "--noise", "qp_map": "--qp-map",
                                      "idle_rgb": "--idle-rgb", "gpu_priority": "--gpu-priority", "encode_profile": "--encode-profile",
                                      "install_dir": "--install-dir", "debug": "--debug", "benchmark_network": "--benchmark-network", "bench_step_s": "--bench-step-s",
-                                     "connect_timeout": "--connect-timeout", "exit_after_frames": "--exit-after-frames"})
+                                     "connect_timeout": "--connect-timeout", "exit_after_frames": "--exit-after-frames",
+                                     "send_pacing": "--send-pacing", "running_start_ms": "--running-start-ms", "boundary_offset_ms": "--boundary-offset-ms",
+                                     "gpu_sched_class": "--gpu-sched-class"})
                        + f' > {rd}\\host_stdout.txt 2>&1')
             if topo.get("host_launch") == "interactive":
                 log("  starting host (builder, interactive session, limited)")
@@ -309,8 +311,11 @@ def run_scenario(sc, outdir: Path, log=print):
                               "exit_after_frames": "--exit-after-frames", "yaw_amp": "--yaw-amp", "yaw_hz": "--yaw-hz",
                               "refresh": "--refresh", "res": "--res", "decode_ms": "--decode-ms",
                               "no_10bit": "--no-10bit", "no_foveation": "--no-foveation", "controllers": "--controllers",
-                              "views_after_first_frame": "--views-after-first-frame", "encoding_gamma": "--encoding-gamma"})
+                              "views_after_first_frame": "--views-after-first-frame", "encoding_gamma": "--encoding-gamma",
+                              "display_sim": "--display-sim", "poll_ms": "--poll-ms", "queue_max": "--queue-max", "motion": "--motion",
+                              "noise_mdeg": "--noise-mdeg", "bunch": "--bunch"})
                 + (f" --controllers-csv {rd}\\controllers.csv" if c.get("controllers") and not sfx else "")
+                + (f" --display-csv {rd}\\display{sfx}.csv" if c.get("display_sim") else "")
                 + f' > {rd}\\client{sfx}_stdout.txt 2>&1')
     clientcmd = make_client_cmd()
     client_p = b_popen(clientcmd)
@@ -363,7 +368,7 @@ def run_scenario(sc, outdir: Path, log=print):
     if gpu_p:
         b_get(f"runs/{rid}/gpu.csv", outdir / "gpu.csv")
     if app:
-        for f in ("app.log", "app_pose.csv", "app_input.csv", "app_stdout.txt", "app.rc", "ovrshim.log"):
+        for f in ("app.log", "app_pose.csv", "app_input.csv", "app_timing.csv", "app_stdout.txt", "app.rc", "ovrshim.log"):
             b_get(f"runs/{rid}/{f}", outdir / f)
     for f in ("client_report.json", "client_stdout.txt", "frames.csv", "client.hevc"):
         b_get(f"runs/{rid}/{f}", outdir / f)
@@ -372,6 +377,8 @@ def run_scenario(sc, outdir: Path, log=print):
             b_get(f"runs/{rid}/{f}", outdir / f)
     if sc.get("client", {}).get("controllers"):
         b_get(f"runs/{rid}/controllers.csv", outdir / "controllers.csv")
+    if sc.get("client", {}).get("display_sim"):
+        b_get(f"runs/{rid}/display.csv", outdir / "display.csv")
     return steps
 
 
@@ -782,6 +789,68 @@ def analyse_pacing(sc, outdir, period_ms):
             "max": round(max(d), 2), "late": sum(x > 1.5 * period_ms for x in d), "late_frac": round(sum(x > 1.5 * period_ms for x in d) / len(d), 4)}
 
 
+def analyse_display(sc, outdir, client, period_ms):
+    """The emulated Vision Pro display (mock client --display-sim): repeats, skips, dwell. The same numbers the real headset's
+    statistics give (client_frames.csv), so a loopback run and a headset run read alike."""
+    d = (client or {}).get("display")
+    if not d:
+        return None
+    out = dict(d)
+    out["period_ms"] = period_ms
+    out["dwell_spread_ms"] = round((d.get("dwell_ms") or {}).get("p95", 0) - (d.get("dwell_ms") or {}).get("p05", 0), 2)
+    _, rows = read_csv(outdir / "display.csv")   # tick_ns,shown_ts_ns,repeat,dwell_ms,queue_len
+    if rows:
+        reps = [int(r[2]) for r in rows[90:]]
+        runs, cur = [], 0     # runs of consecutive repeats (a stall) vs isolated ones (a missed slot)
+        for x in reps:
+            if x:
+                cur += 1
+            elif cur:
+                runs.append(cur)
+                cur = 0
+        if cur:
+            runs.append(cur)
+        out["repeat_runs"] = {"n": len(runs), "max": max(runs) if runs else 0, "over_2": sum(1 for r in runs if r > 2)}
+    return out
+
+
+def analyse_pipeline(outdir):
+    """The host's staged pipeline counters (the last encoder_stats window carries the totals)."""
+    last = None
+    p = outdir / "host_stdout.txt"
+    for line in (open(p, errors="replace").read().splitlines() if p.exists() else []):
+        if '"encoder_stats"' in line:
+            try:
+                e = json.loads(line)
+                if e["data"].get("pipeline"):
+                    last = e["data"]["pipeline"]
+            except (ValueError, KeyError):
+                pass
+    if not last:
+        return None
+    out = {k: last.get(k) for k in ("send_pacing", "arrived", "superseded", "slots_filled", "slots_empty", "encoder_overruns", "send_late", "encode_envelope_ms")}
+    out["shim"] = last.get("shim")
+    out["gpu_scheduling"] = last.get("gpu_scheduling")
+    filled = out.get("slots_filled") or 0
+    out["superseded_frac"] = round((out.get("superseded") or 0) / max(1, (out.get("arrived") or 1)), 4)
+    out["empty_frac"] = round((out.get("slots_empty") or 0) / max(1, filled + (out.get("slots_empty") or 0)), 4)
+    return out
+
+
+def analyse_app_timing(outdir, period_ms):
+    """The game side (xr_probe XR_PROBE_TIMING_CSV): frame time = xrWaitFrame return to xrEndFrame return, and the release cadence."""
+    _, rows = read_csv(outdir / "app_timing.csv")   # frame,display_time_ns,t_wait_return_ms,t_end_ms,load_factor
+    if len(rows) < 60:
+        return None
+    rows = rows[30:]
+    ft = [float(r[3]) - float(r[2]) for r in rows]
+    rel = [float(b[2]) - float(a[2]) for a, b in zip(rows, rows[1:])]
+    return {"n": len(ft), "frame_ms": {"p50": round(pct(ft, .5), 2), "p95": round(pct(ft, .95), 2), "max": round(max(ft), 2)},
+            "release_interval_ms": {"p50": round(pct(rel, .5), 2), "p95": round(pct(rel, .95), 2), "max": round(max(rel), 2),
+                                    "over_1p5_period": sum(1 for x in rel if x > 1.5 * period_ms)},
+            "fps": round(1000.0 / max(1e-6, sum(rel) / max(1, len(rel))), 1)}
+
+
 def analyse_qpmap(sc, outdir, host):
     out = {}
     qk = sc["checks"]["qpmap"]
@@ -900,6 +969,13 @@ def analyse(sc, outdir: Path):
         a["qpmap"] = analyse_qpmap(sc, outdir, a.get("host") or {})
     if sc.get("checks", {}).get("pacing") and sc.get("app"):
         a["pacing"] = analyse_pacing(sc, outdir, 1000.0 / ((a.get("host") or {}).get("fps_target") or 90.0))
+    period = 1000.0 / ((a.get("host") or {}).get("fps_target") or 90.0)
+    if sc.get("client", {}).get("display_sim"):
+        a["display"] = analyse_display(sc, outdir, a.get("client"), period)
+    if (outdir / "host_stdout.txt").exists():
+        a["pipeline"] = analyse_pipeline(outdir)
+    if (outdir / "app_timing.csv").exists():
+        a["app_timing"] = analyse_app_timing(outdir, period)
     if sc.get("checks", {}).get("frame_classes") and cl.exists() and cl.stat().st_size > 0:
         classes = read_frame_classes(cl)
         runs, stray = rle(classes)
@@ -1063,6 +1139,42 @@ def evaluate(sc, a):
             chk("qpmap_center_keeps_more_detail", (qa.get("detail_ratio") or 0) >= qk["min_detail_ratio"], qa.get("detail") or qa.get("detail_error"), f"decoded detail center/edge >= {qk['min_detail_ratio']} (ratio {qa.get('detail_ratio')})")
         if "max_detail_ratio" in qk:
             chk("qpmap_off_is_flat", (qa.get("detail_ratio") or 99) <= qk["max_detail_ratio"], qa.get("detail"), f"decoded detail center/edge <= {qk['max_detail_ratio']} with the map off (ratio {qa.get('detail_ratio')})")
+    if "display" in ck:
+        dc, dk = ck["display"], a.get("display")
+        chk("display_measured", dk is not None and dk.get("ticks", 0) > 200, dk and dk.get("ticks"), "> 200 emulated display ticks")
+        if dk:
+            if "max_repeat_pct" in dc:
+                chk("display_repeat_pct", dk["repeat_pct"] <= dc["max_repeat_pct"], round(dk["repeat_pct"], 2), f"<= {dc['max_repeat_pct']} % of ticks re-presented the last frame (SteamVR+ALVR on the headset: 3.4)")
+            if "max_skip_pct" in dc:
+                chk("display_skip_pct", dk["skip_pct"] <= dc["max_skip_pct"], round(dk["skip_pct"], 2), f"<= {dc['max_skip_pct']} % of shown frames jumped a frame")
+            if "max_dwell_spread_ms" in dc:
+                chk("display_dwell_spread_ms", dk["dwell_spread_ms"] <= dc["max_dwell_spread_ms"], dk["dwell_spread_ms"], f"<= {dc['max_dwell_spread_ms']} (dwell p95 - p05: a flat queue means regular arrival)")
+            if "min_fps" in dc:
+                chk("display_fps", dk["display_fps"] >= dc["min_fps"], round(dk["display_fps"], 1), f">= {dc['min_fps']}")
+            if "max_repeat_run" in dc and dk.get("repeat_runs"):
+                chk("display_max_repeat_run", dk["repeat_runs"]["max"] <= dc["max_repeat_run"], dk["repeat_runs"]["max"], f"<= {dc['max_repeat_run']} consecutive repeats (no stalls)")
+    if "pipeline" in ck:
+        pc2, pp = ck["pipeline"], a.get("pipeline")
+        chk("pipeline_measured", pp is not None, pp is not None, "staged pipeline counters in encoder_stats")
+        if pp:
+            if "max_superseded_frac" in pc2:
+                chk("pipeline_superseded_frac", pp["superseded_frac"] <= pc2["max_superseded_frac"], pp["superseded_frac"], f"<= {pc2['max_superseded_frac']} of arrived frames replaced before a boundary (app faster than the display)")
+            if "max_encoder_overruns" in pc2:
+                chk("pipeline_encoder_overruns", (pp.get("encoder_overruns") or 0) <= pc2["max_encoder_overruns"], pp.get("encoder_overruns"), f"<= {pc2['max_encoder_overruns']} (encode longer than a period)")
+            if "max_empty_frac" in pc2:
+                chk("pipeline_empty_frac", pp["empty_frac"] <= pc2["max_empty_frac"], pp["empty_frac"], f"<= {pc2['max_empty_frac']} boundaries without a new frame")
+            if "max_send_late" in pc2:
+                chk("pipeline_send_late", (pp.get("send_late") or 0) <= pc2["max_send_late"], pp.get("send_late"), f"<= {pc2['max_send_late']} sends after boundary + lead")
+            if pc2.get("gpu_sched_class") is not None:
+                g = pp.get("gpu_scheduling") or {}
+                chk("pipeline_gpu_sched_class", g.get("class") == pc2["gpu_sched_class"] and g.get("status") == 0, g, f"class {pc2['gpu_sched_class']} granted")
+    if "app_timing" in ck:
+        at, ak = ck["app_timing"], a.get("app_timing")
+        chk("app_timing_measured", ak is not None, ak is not None, "xr_probe per-frame timing")
+        if ak and "min_fps" in at:
+            chk("app_timing_fps", ak["fps"] >= at["min_fps"], ak["fps"], f">= {at['min_fps']} (the shim's running start must not starve the app)")
+        if ak and "max_release_p95_ms" in at:
+            chk("app_timing_release_p95_ms", ak["release_interval_ms"]["p95"] <= at["max_release_p95_ms"], ak["release_interval_ms"]["p95"], f"<= {at['max_release_p95_ms']} (one release per display period)")
     if "pacing" in ck:
         pc, pk = ck["pacing"], a.get("pacing")
         chk("pacing_measured", pk is not None, pk, "client arrival spacing of the app's frames (after warm-up)")

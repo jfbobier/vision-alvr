@@ -27,6 +27,8 @@ def load(name):
     if not p.exists():
         p = SCEN / "optional" / f"{name}.json"      # cross-network scenarios, not part of `all`
     if not p.exists():
+        p = SCEN / "pacing" / f"{name}.json"        # pacing lab (`run.py pacing`), not part of `all`
+    if not p.exists():
         raise SystemExit(f"unknown scenario {name}; available: {', '.join(x.stem for x in sorted(SCEN.glob('*.json')))}")
     sc = json.load(open(p))
     sc.setdefault("name", name)
@@ -132,8 +134,16 @@ def build(what):
                 print(o[-1200:])
                 return 2
             continue
-        if w == "probe":     # the OpenXR test app
+        if w == "probe":     # the OpenXR test app (+ the benchmark scene renderer it can show, and the scene file)
             lib.b_put(lib.ROOT / "tools/probe/xr_probe.cpp", "_tmp/xr_probe.cpp")
+            lib.b_run("if not exist nvenc\\hostlib mkdir nvenc\\hostlib")
+            lib.b_put(lib.ROOT / "nvenc/hostlib/bench_scene.h", "nvenc/hostlib/bench_scene.h")
+            lib.b_run("if not exist third_party\\stb mkdir third_party\\stb")
+            lib.b_put(lib.ROOT / "third_party/stb/stb_image.h", "third_party/stb/stb_image.h")
+            vab = lib.ROOT / "build/bench/littlest_tokyo.vab"
+            if vab.exists():
+                lib.b_run("if not exist bench mkdir bench")
+                lib.b_put(vab, "bench/littlest_tokyo.vab")
             r = subprocess.run(["bash", str(lib.BUILDER), "ps", "tools/remote/stage12_probe_build.ps1"], cwd=lib.ROOT, capture_output=True)
             o = r.stdout.decode(errors="replace").replace("\x00", "")
             ok = "RESULT: OK" in o
@@ -271,6 +281,28 @@ def main(argv):
         return 0 if "RESULT: PASS" in out else 1
     if cmd == "bench-quality":     # alvr_host --benchmark-quality on the builder (no headset), then checks on its results
         return bench_quality(argv[2] if len(argv) > 2 else "quick")
+    if cmd == "pacing":            # the pacing lab: every scenarios/pacing/*.json (or the named ones), then one KPI table
+        names = argv[2:] or [p.stem for p in sorted((SCEN / "pacing").glob("*.json"))]
+        rows = []
+        for n in names:
+            run_one(n)
+            d = lib.RESULTS / "latest"
+            a = json.load(open(d / "analysis.json")) if (d / "analysis.json").exists() else {}
+            r = json.load(open(d / "result.json"))
+            dk, pp, ak = a.get("display") or {}, a.get("pipeline") or {}, a.get("app_timing") or {}
+            dw = dk.get("dwell_ms") or {}
+            nan = float("nan")
+            rows.append([n, r["status"], f'{(ak.get("fps") or 0):.0f}', f'{dk.get("repeat_pct", nan):.1f}', f'{dk.get("skip_pct", nan):.1f}',
+                         f'{dw.get("p05", nan):.1f}', f'{dw.get("p50", nan):.1f}', f'{dw.get("p95", nan):.1f}',
+                         str(pp.get("slots_empty")), str(pp.get("superseded")), str(pp.get("encoder_overruns")), str(pp.get("send_late")),
+                         f'{((pp.get("shim") or {}).get("app_frame_ms") or 0):.1f}', str((pp.get("shim") or {}).get("releases_late"))])
+        hdr = ["scenario", "status", "app_fps", "repeat%", "skip%", "dwell_p05", "dwell_p50", "dwell_p95", "empty", "superseded", "overruns", "send_late", "app_env_ms", "rel_late"]
+        w = [max(len(h), *(len(r[i]) for r in rows)) for i, h in enumerate(hdr)]
+        print("\n== pacing lab (reference SteamVR + ALVR on the headset: repeat 3.4 %, dwell 9-11 ms)")
+        print("  ".join(h.ljust(w[i]) for i, h in enumerate(hdr)))
+        for r in rows:
+            print("  ".join(c.ljust(w[i]) for i, c in enumerate(r)))
+        return 0 if all(r[1] == "PASS" for r in rows) else 1
     if cmd == "report":
         d = Path(argv[2]) if len(argv) > 2 else lib.RESULTS / "latest"
         r = json.load(open(d / "result.json"))
