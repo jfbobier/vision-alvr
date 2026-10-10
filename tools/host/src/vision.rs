@@ -10,7 +10,7 @@ use std::{
     time::Duration,
 };
 
-pub const VERSION: &str = "0.1-alpha";
+pub const VERSION: &str = "0.2-alpha";
 
 /// Portable install: everything sits in the folder the user unzipped (`alvr_host.exe` next to the runtime DLLs), with
 /// `config/` (session.json, visionalvr.json) and `logs/` inside it.

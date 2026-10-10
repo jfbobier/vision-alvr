@@ -123,3 +123,7 @@ Apple, NVIDIA or Virtual Desktop. Apple Vision Pro and visionOS are trademarks o
 
 ## License
 MIT, see [LICENSE](LICENSE). Third-party components keep their own licences ([THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)).
+
+## Documentation
+
+- [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md): the frame pipeline, its threads and buffers (v0.2)
