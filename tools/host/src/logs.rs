@@ -189,6 +189,16 @@ impl log::Log for AlvrLogger {
                 Err(_) => {}
             }
         }
+        // server_core logs this for every input sample of a button it has no mapping for (~400 lines/s from the AVP client):
+        // keep the first line per button name
+        if let Some(name) = msg.strip_prefix("Received button not mapped: ") {
+            static SEEN: Mutex<Vec<String>> = Mutex::new(Vec::new());
+            let mut seen = SEEN.lock();
+            if seen.iter().any(|n| n == name) {
+                return;
+            }
+            seen.push(name.to_string());
+        }
         let level = match record.level() {
             log::Level::Error => "ERROR",
             log::Level::Warn => "WARN",
@@ -227,7 +237,10 @@ pub mod client_stats {
         decoder_queue: f64,
         client_compositor: f64,
         vsync_queue: f64,
-        client_fps: f64,
+        client_frame_s: f64, // sum of 1 / client_fps over the samples with a sane value (client_n)
+        client_n: u32,
+        vsync_n: u32,        // samples with a sane vsync_queue (the client's unsigned subtraction can wrap to ~3e10 ms)
+        since: Option<std::time::Instant>, // first sample of the window
         server_fps: f64,
         throughput_bps: f64,
         bitrate_bps: f64,
@@ -235,7 +248,7 @@ pub mod client_stats {
 
     const ZERO: Agg = Agg {
         n: 0, total: 0.0, game: 0.0, compositor: 0.0, encoder: 0.0, network: 0.0, decoder: 0.0, decoder_queue: 0.0,
-        client_compositor: 0.0, vsync_queue: 0.0, client_fps: 0.0, server_fps: 0.0, throughput_bps: 0.0, bitrate_bps: 0.0,
+        client_compositor: 0.0, vsync_queue: 0.0, client_frame_s: 0.0, client_n: 0, vsync_n: 0, since: None, server_fps: 0.0, throughput_bps: 0.0, bitrate_bps: 0.0,
     };
     /// Windows: 0 = encoder_stats (2 s), 1 = status (10 s), 2 = benchmark step.
     static WINDOWS: std::sync::Mutex<[Agg; 3]> = std::sync::Mutex::new([ZERO, ZERO, ZERO]);
@@ -253,8 +266,17 @@ pub mod client_stats {
             a.decoder += g.decoder_s as f64;
             a.decoder_queue += g.decoder_queue_s as f64;
             a.client_compositor += g.client_compositor_s as f64;
-            a.vsync_queue += g.vsync_queue_s as f64;
-            a.client_fps += g.client_fps as f64;
+            a.since.get_or_insert_with(std::time::Instant::now);
+            if (0.0..1.0).contains(&g.vsync_queue_s) {
+                a.vsync_queue += g.vsync_queue_s as f64;
+                a.vsync_n += 1;
+            }
+            // client_fps is per frame (1 / gap between two displayed frames): average the gaps, not the rates, which
+            // overweighted short gaps; 0 and absurd values (1704 fps seen) are dropped
+            if g.client_fps > 1.0 && g.client_fps < 500.0 {
+                a.client_frame_s += 1.0 / g.client_fps as f64;
+                a.client_n += 1;
+            }
             a.server_fps += g.server_fps as f64;
             a.throughput_bps += g.throughput_bps as f64;
             a.bitrate_bps += g.bitrate_bps as f64;
@@ -282,12 +304,18 @@ pub mod client_stats {
         }
         let n = a.n as f64;
         let ms = |x: f64| (x / n * 1000.0 * 100.0).round() / 100.0;
+        let r1 = |x: f64| (x * 10.0).round() / 10.0;
+        let client_fps = if a.client_n > 0 { r1(a.client_n as f64 / a.client_frame_s) } else { 0.0 };
+        let vsync_queue_ms = if a.vsync_n > 0 { (a.vsync_queue / a.vsync_n as f64 * 1000.0 * 100.0).round() / 100.0 } else { 0.0 };
+        // frames the headset reported as displayed, per second of window (frames it skipped never report)
+        let secs = a.since.map(|t| t.elapsed().as_secs_f64()).unwrap_or(0.0);
+        let displayed_fps = if secs > 0.5 { r1(n / secs) } else { client_fps };
         Some(json!({
             "samples": a.n,
             "total_latency_ms": ms(a.total), "game_ms": ms(a.game), "server_compositor_ms": ms(a.compositor),
             "encode_ms": ms(a.encoder), "network_ms": ms(a.network), "decode_ms": ms(a.decoder),
-            "decoder_queue_ms": ms(a.decoder_queue), "client_compositor_ms": ms(a.client_compositor), "vsync_queue_ms": ms(a.vsync_queue),
-            "client_fps": (a.client_fps / n * 10.0).round() / 10.0, "server_fps": (a.server_fps / n * 10.0).round() / 10.0,
+            "decoder_queue_ms": ms(a.decoder_queue), "client_compositor_ms": ms(a.client_compositor), "vsync_queue_ms": vsync_queue_ms,
+            "client_fps": client_fps, "displayed_fps": displayed_fps, "server_fps": (a.server_fps / n * 10.0).round() / 10.0,
             "throughput_mbps": (a.throughput_bps / n / 1e6 * 10.0).round() / 10.0, "bitrate_mbps": (a.bitrate_bps / n / 1e6 * 10.0).round() / 10.0,
         }))
     }

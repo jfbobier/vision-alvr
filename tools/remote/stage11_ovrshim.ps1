@@ -10,6 +10,14 @@ New-Item -ItemType Directory -Force $dst | Out-Null
 robocopy "$vdxr\OVRNull" $dst /E /XD bin obj /XF OVRNull.vcxproj OVRNull.vcxproj.user OVRNull.vcxproj.filters /NFL /NDL /NJH /NJS /NP | Out-Null
 # our overrides / additions
 Copy-Item "$root\_tmp\ovrshim\*" $dst -Force -Recurse
+# driver.cpp implements the audio endpoint strings (Unity calls them every frame): drop OVRNull's stubs of the two functions
+$stubs = Get-Content "$dst\stubs.cpp" -Raw
+foreach ($fn in 'ovr_GetAudioDeviceOutGuidStr', 'ovr_GetAudioDeviceInGuidStr') {
+  $re = 'OVR_PUBLIC_FUNCTION\(ovrResult\)\s*' + $fn + '\(.*?\r?\n\}\r?\n'
+  if (-not [regex]::IsMatch($stubs, $re, 'Singleline')) { Write-Host "RESULT: BLOCKED (cannot find $fn in OVRNull\stubs.cpp)"; exit 1 }
+  $stubs = [regex]::Replace($stubs, $re, '', 'Singleline')
+}
+Set-Content "$dst\stubs.cpp" $stubs -Encoding UTF8 -NoNewline
 $proj = Get-Content "$vdxr\OVRNull\OVRNull.vcxproj" -Raw
 # the project lists its shaders as FxCompile items: add ours by cloning the ReprojectVS/PS entries
 $fxVs = [regex]::Match($proj, '<FxCompile Include="ReprojectVS.hlsl">.*?</FxCompile>', 'Singleline').Value

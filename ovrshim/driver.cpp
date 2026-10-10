@@ -35,7 +35,9 @@
 #include "layerconstants.h"
 #include "ipc_win.h"
 
+#include <algorithm>
 #include <deque>
+#include <mmdeviceapi.h>
 
 using namespace visionalvr_ipc;
 
@@ -1078,12 +1080,33 @@ namespace {
                     m_statT0 = nowS;
                     m_statTicks0 = m_lastSignaledVsync;
                     ShimLog("frames %llu: %.1f fps, vsync %.1f Hz (host %u events, %u local timeouts), last compose+GPU %.2f ms, "
-                            "layers %d, ts matched %u / fallback %u; vsync ticks %lld, "
+                            "layers %d, ts matched %u (by display time %llu) / fallback %u; vsync ticks %lld, "
                             "WaitToBeginFrame calls %llu (waited %llu, repeated index %llu, timeouts %llu)",
                             (unsigned long long)m_framesSubmitted, fps, rate, (unsigned)m_vsyncFromHost, (unsigned)m_vsyncTimeouts,
-                            st.lastComposeMs, composed, st.tsMatched, st.tsFallback,
+                            st.lastComposeMs, composed, st.tsMatched, (unsigned long long)m_tsByDisplayTime, st.tsFallback,
                             m_lastSignaledVsync, (unsigned long long)m_waitCalls, (unsigned long long)m_waitWaited,
                             (unsigned long long)m_waitRepeatedIndex, (unsigned long long)m_waitTimeouts);
+                    auto pct = [](std::vector<float>& v, double q) {
+                        if (v.empty()) {
+                            return 0.0f;
+                        }
+                        const size_t i = std::min(v.size() - 1, (size_t)(q * v.size()));
+                        std::nth_element(v.begin(), v.begin() + i, v.end());
+                        return v[i];
+                    };
+                    const size_t n = m_diagAngleMdeg.size();
+                    ShimLog("pose match (%zu frames): residual mdeg p50 %.3f p95 %.3f max %.3f; picked newest/2nd/3rd/older %u/%u/%u/%u, "
+                            "age behind newest ms p50 %.1f p95 %.1f max %.1f; ties 1/2/3+ %u/%u/%u; no pose for display time %u; "
+                            "same timestamp as the previous frame %u",
+                            n, pct(m_diagAngleMdeg, 0.5), pct(m_diagAngleMdeg, 0.95), pct(m_diagAngleMdeg, 1.0), m_diagPickIdx[0],
+                            m_diagPickIdx[1], m_diagPickIdx[2], m_diagPickIdx[3], pct(m_diagAgeMs, 0.5), pct(m_diagAgeMs, 0.95),
+                            pct(m_diagAgeMs, 1.0), m_diagTies[0], m_diagTies[1], m_diagTies[2], m_diagNoDisplayTime, m_diagSameTs);
+                    m_diagAngleMdeg.clear();
+                    m_diagAgeMs.clear();
+                    memset(m_diagPickIdx, 0, sizeof(m_diagPickIdx));
+                    memset(m_diagTies, 0, sizeof(m_diagTies));
+                    m_diagNoDisplayTime = 0;
+                    m_diagSameTs = 0;
                 }
                 if (m_publishThread.joinable()) {
                     // The host may only read the slot once the GPU is done with it, and that includes the app's own rendering of
@@ -1240,32 +1263,76 @@ namespace {
                 auto sample = [&](size_t k) -> const PoseSample& { // k = 0 is the newest
                     return m_poseRing[(m_poseRingHead + kPoseRing - 1 - k) % kPoseRing];
                 };
-                auto closeness = [&](const PoseSample& p) { // |dot| of unit quaternions = cos(angle / 2)
-                    return std::abs((double)p.orientation.x * target.x + (double)p.orientation.y * target.y +
-                                    (double)p.orientation.z * target.z + (double)p.orientation.w * target.w);
+                // Angle between a recorded pose and the layer's, from the vector part of the relative rotation (sin of half the
+                // angle): exact down to float rounding (~1e-7 rad). The |dot| = cos(angle / 2) used before cancels near 1 and
+                // could not tell apart poses less than ~0.07 degree apart.
+                auto angle = [&](const PoseSample& p) {
+                    const double pw = p.orientation.w, px = -(double)p.orientation.x, py = -(double)p.orientation.y,
+                                 pz = -(double)p.orientation.z; // conjugate of p
+                    const double rx = pw * target.x + px * target.w + py * target.z - pz * target.y;
+                    const double ry = pw * target.y - px * target.z + py * target.w + pz * target.x;
+                    const double rz = pw * target.z + px * target.y - py * target.x + pz * target.w;
+                    return 2.0 * std::asin(std::min(1.0, std::sqrt(rx * rx + ry * ry + rz * rz)));
                 };
                 if (m_poseRingCount && sample(0).clientTsNs < m_lastFrameTsNs) {
                     m_lastFrameTsNs = 0; // the client's clock restarted (new headset session)
                 }
-                // A head that turns back passes the same orientation twice: never go behind the previous frame's timestamp,
-                // and among equally good matches take the newest.
-                double best = 0.0;
+                // The pose the app rendered with is the recorded one with the smallest angle; a head that turns back passes the
+                // same orientation twice, so never go behind the previous frame's timestamp. Poses within float noise of the best
+                // are a tie (a still head): VDXR stamps the layer with the frame's display time (SensorSampleTime), the time the
+                // app asked its pose for, so prefer a tie read for that time (pipelined engines read frame N+1's pose before
+                // submitting frame N: taking the newest of the ties stamped frame N with N+1's sample, a few pixels of tremble),
+                // else the newest. Display time alone is not enough: some engines render with a pose read for another time.
+                constexpr double kTie = 2e-6;         // rad (~0.0001 degree)
+                constexpr double kMaxAngle = 0.0087;  // rad (~0.5 degree): the app rendered with a pose it read from us
+                double best = 1e9;
                 for (size_t k = 0; k < m_poseRingCount; k++) {
                     if (sample(k).clientTsNs >= m_lastFrameTsNs) {
-                        best = std::max(best, closeness(sample(k)));
+                        best = std::min(best, angle(sample(k)));
                     }
                 }
-                if (best >= 0.99999) { // ~0.5 degree: the app rendered with a pose it read from us
-                    for (size_t k = 0; k < m_poseRingCount; k++) {
-                        if (sample(k).clientTsNs >= m_lastFrameTsNs && closeness(sample(k)) >= best - 2e-7) {
-                            ts = sample(k).clientTsNs;
-                            matched = true;
-                            break;
+                if (best <= kMaxAngle) {
+                    size_t pick = kPoseRing, pickTimed = kPoseRing;
+                    for (size_t k = 0; k < m_poseRingCount; k++) { // newest first
+                        const PoseSample& p = sample(k);
+                        if (p.clientTsNs < m_lastFrameTsNs || angle(p) > best + kTie) {
+                            continue;
                         }
+                        if (pick == kPoseRing) {
+                            pick = k;
+                        }
+                        if (pickTimed == kPoseRing && eye->SensorSampleTime > 0.0 &&
+                            std::abs(p.displayTime - eye->SensorSampleTime) < 1e-4) {
+                            pickTimed = k;
+                        }
+                    }
+                    if (pickTimed < kPoseRing) {
+                        pick = pickTimed;
+                        m_tsByDisplayTime++;
+                    } else {
+                        m_diagNoDisplayTime++;
+                    }
+                    if (pick < kPoseRing) {
+                        ts = sample(pick).clientTsNs;
+                        matched = true;
+                        uint32_t ties = 0;
+                        for (size_t k = 0; k < m_poseRingCount; k++) {
+                            if (sample(k).clientTsNs >= m_lastFrameTsNs && angle(sample(k)) <= best + kTie) {
+                                ties++;
+                            }
+                        }
+                        m_diagTies[std::min<uint32_t>(ties, 3) - 1]++;
+                        m_diagPickIdx[std::min<size_t>(pick, 3)]++;
+                        m_diagAngleMdeg.push_back((float)(best * 57295.78));
+                        m_diagAgeMs.push_back((float)((sample(0).clientTsNs - sample(pick).clientTsNs) / 1e6));
                     }
                 }
                 m_lastFrameTsNs = std::max(m_lastFrameTsNs, ts);
             }
+            if (ts != 0 && ts == m_diagPrevTs) {
+                m_diagSameTs++;
+            }
+            m_diagPrevTs = ts;
             if (m_ipc.state) {
                 (matched ? m_ipc.state->shim.tsMatched : m_ipc.state->shim.tsFallback)++;
             }
@@ -1656,8 +1723,9 @@ namespace {
                     // history of what the app read, for FrameClientTimestamp (skip exact repeats of the newest entry)
                     const OVR::Quatf q = result.ThePose.Orientation;
                     const PoseSample* newest = m_poseRingCount ? &m_poseRing[(m_poseRingHead + kPoseRing - 1) % kPoseRing] : nullptr;
-                    if (!newest || newest->clientTsNs != clientTs || std::abs(newest->orientation.Dot(q)) < 0.9999999f) {
-                        m_poseRing[m_poseRingHead] = {clientTs, q};
+                    if (!newest || newest->clientTsNs != clientTs || newest->displayTime != absTime ||
+                        std::abs(newest->orientation.Dot(q)) < 0.9999999f) {
+                        m_poseRing[m_poseRingHead] = {clientTs, q, absTime};
                         m_poseRingHead = (m_poseRingHead + 1) % kPoseRing;
                         m_poseRingCount = std::min(m_poseRingCount + 1, kPoseRing);
                     }
@@ -1811,7 +1879,17 @@ namespace {
         struct PoseSample {
             uint64_t clientTsNs;
             OVR::Quatf orientation;
+            double displayTime; // the absTime the app asked the pose for (its frame's predicted display time)
         };
+        uint64_t m_tsByDisplayTime{0}; // frames matched through SensorSampleTime (FrameClientTimestamp)
+        // matching diagnostics since the last stats line: residual angle of the match (millidegrees), which sample was picked
+        // (0 = the newest the app had read), its age behind the newest, and how many recorded poses tied with it
+        std::vector<float> m_diagAngleMdeg, m_diagAgeMs;
+        uint32_t m_diagPickIdx[4]{};   // picked sample index 0, 1, 2, 3+
+        uint32_t m_diagTies[3]{};      // 1, 2, 3+ poses within the tie window
+        uint32_t m_diagNoDisplayTime{0}; // no recorded pose for the frame's display time
+        uint32_t m_diagSameTs{0};        // frames stamped with the previous frame's timestamp (the client may skip those)
+        uint64_t m_diagPrevTs{0};
         static constexpr size_t kPoseRing = 256;
         mutable PoseSample m_poseRing[kPoseRing]{};
         mutable size_t m_poseRingHead{0};
@@ -1846,3 +1924,71 @@ namespace ovrnull::driver {
     }
 
 } // namespace ovrnull::driver
+
+// Audio endpoints. VDXR answers XR_OCULUS_audio_device_guid with ovr_GetAudioDeviceOutGuidStr. Unity's OpenXR plugin calls
+// it every frame and looks the string up among the Windows endpoints; OVRNull's stub returned an empty string (and zeroed
+// only sizeof(pointer) bytes), the lookup failed every frame ("[XR] GetAduioDeviceGUIDFromIDString Failed.") and its
+// failure path corrupted the heap after a while (Unity games crashing in UnityOpenXR -> MMDevAPI -> PropVariantClear).
+// The headset's audio is ALVR's capture of the Windows default output, so that endpoint is the right answer; the default
+// input is the one ALVR's microphone feeds. stage11 removes OVRNull's versions of these two functions.
+namespace {
+    struct EndpointIdCache {
+        std::mutex mutex;
+        std::wstring id;
+        ULONGLONG at{0};
+    };
+
+    // IMMDevice::GetId of the default endpoint for `flow`, refreshed at most once a second (callers poll every frame).
+    std::wstring DefaultEndpointId(EDataFlow flow) {
+        static EndpointIdCache caches[2];
+        auto& c = caches[flow == eCapture ? 1 : 0];
+        std::lock_guard lock(c.mutex);
+        const ULONGLONG now = GetTickCount64();
+        if (c.at != 0 && now - c.at < 1000) {
+            return c.id;
+        }
+        c.at = now;
+        const HRESULT init = CoInitializeEx(nullptr, COINIT_MULTITHREADED); // RPC_E_CHANGED_MODE: the thread already has COM
+        std::wstring id;
+        {
+            ComPtr<IMMDeviceEnumerator> enumerator;
+            ComPtr<IMMDevice> device;
+            LPWSTR raw = nullptr;
+            if (SUCCEEDED(CoCreateInstance(__uuidof(MMDeviceEnumerator), nullptr, CLSCTX_ALL, IID_PPV_ARGS(&enumerator))) &&
+                SUCCEEDED(enumerator->GetDefaultAudioEndpoint(flow, eConsole, &device)) && SUCCEEDED(device->GetId(&raw))) {
+                id = raw;
+                CoTaskMemFree(raw);
+            }
+        }
+        if (SUCCEEDED(init)) {
+            CoUninitialize();
+        }
+        if (id != c.id) {
+            shimlog::Debug("audio: default %s endpoint %s", flow == eCapture ? "input" : "output",
+                           id.empty() ? "(none)" : shimlog::Utf8(id).c_str());
+        }
+        c.id = id;
+        return id;
+    }
+
+    ovrResult CopyEndpointId(EDataFlow flow, WCHAR* buffer) {
+        if (!buffer) {
+            return ovrError_InvalidParameter;
+        }
+        ZeroMemory(buffer, OVR_AUDIO_MAX_DEVICE_STR_SIZE * sizeof(WCHAR));
+        const std::wstring id = DefaultEndpointId(flow);
+        // no endpoint: an empty string, as before (an error would make VDXR fail the OpenXR call every frame)
+        if (!id.empty() && id.size() < OVR_AUDIO_MAX_DEVICE_STR_SIZE) {
+            wcsncpy_s(buffer, OVR_AUDIO_MAX_DEVICE_STR_SIZE, id.c_str(), _TRUNCATE);
+        }
+        return ovrSuccess;
+    }
+} // namespace
+
+OVR_PUBLIC_FUNCTION(ovrResult) ovr_GetAudioDeviceOutGuidStr(WCHAR deviceOutStrBuffer[OVR_AUDIO_MAX_DEVICE_STR_SIZE]) {
+    return CopyEndpointId(eRender, deviceOutStrBuffer);
+}
+
+OVR_PUBLIC_FUNCTION(ovrResult) ovr_GetAudioDeviceInGuidStr(WCHAR deviceInStrBuffer[OVR_AUDIO_MAX_DEVICE_STR_SIZE]) {
+    return CopyEndpointId(eCapture, deviceInStrBuffer);
+}

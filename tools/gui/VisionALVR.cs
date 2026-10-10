@@ -202,7 +202,7 @@ namespace VisionALVR
                 case "status":
                     var c = d != null && d.TryGetValue("client", out var cc) ? cc as Dictionary<string, object> : null;
                     stats.Text =
-                        $"Game fps {F(D(d, "app_fps"), "0.0"),6}    streamed fps {F(D(d, "stream_fps"), "0.0"),6}    headset fps {F(D(c, "client_fps"), "0.0"),6}\n" +
+                        $"Game fps {F(D(d, "app_fps"), "0.0"),6}    streamed fps {F(D(d, "stream_fps"), "0.0"),6}    headset shows {F(double.IsNaN(D(c, "displayed_fps")) ? D(c, "client_fps") : D(c, "displayed_fps"), "0.0"),6} fps\n" +
                         $"Bitrate  {F(D(d, "mbps"), "0"),5} Mbps   frames not streamed {S(d, "frames_not_streamed"),4}   packets lost {S(d, "packets_lost"),4}\n" +
                         $"Latency  total {F(D(c, "total_latency_ms"), "0.0"),5} ms = encode {F(D(c, "encode_ms"), "0.0")} + network {F(D(c, "network_ms"), "0.0")} + decode {F(D(c, "decode_ms"), "0.0")} + other";
                     break;

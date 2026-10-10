@@ -104,7 +104,10 @@ fn parse_args() -> Result<Args, String> {
         fps_explicit: false,
         daemon: false,
         force_session: false,
-        split_encode: 0,
+        // forced 3-strip split-frame encoding: NVENC's auto mode only splits frames >= ~2000 lines high (measured on an RTX
+        // 5090, tools/nvenc_split_probe), so the foveated 4224x1664 frame stayed on one engine (6.9 ms vs 2.5 ms). NVENC uses
+        // min(3, engines) strips, so this is also right on 1- and 2-engine GPUs.
+        split_encode: 3,
         qp_map: None,
         dump_qpmap: None,
         idle_rgb: None,

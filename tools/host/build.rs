@@ -2,7 +2,13 @@
 // at %USERPROFILE%\openxr\nvenc) into a static library linked into alvr_host.
 // NvEncoderD3D11.cpp is compiled from a build-time copy with ABGR10 -> DXGI_FORMAT_R10G10B10A2_UNORM
 // (upstream maps it to R8G8B8A8_UNORM, which makes 10-bit encodes black; see docs/progress.md).
-use std::{env, fs, path::PathBuf};
+use std::{env, fs, path::{Path, PathBuf}};
+
+/// A vendored source as text with LF line endings: a Windows clone with git's default core.autocrlf=true checks the files out
+/// with CRLF, and the patch anchors below are written with "\n".
+fn read_lf(path: &Path, what: &str) -> String {
+    fs::read_to_string(path).expect(what).replace("\r\n", "\n")
+}
 
 fn main() {
     let manifest = PathBuf::from(env::var("CARGO_MANIFEST_DIR").unwrap());
@@ -11,7 +17,7 @@ fn main() {
     let up = nvenc.join("upstream");
     let out = PathBuf::from(env::var("OUT_DIR").unwrap());
 
-    let orig = fs::read_to_string(up.join("platform/win32/NvEncoderD3D11.cpp")).expect("read NvEncoderD3D11.cpp");
+    let orig = read_lf(&up.join("platform/win32/NvEncoderD3D11.cpp"), "read NvEncoderD3D11.cpp");
     let needle = "case NV_ENC_BUFFER_FORMAT_ABGR10:";
     let pos = orig.find(needle).expect("ABGR10 case");
     let tail = &orig[pos..];
@@ -26,7 +32,7 @@ fn main() {
 
     // FFR (ALVR's foveated encoding pass), compiled from a build-time copy whose output texture follows the encoder's bit
     // depth: upstream hard-codes R8G8B8A8_UNORM_SRGB, which would silently turn a 10-bit encode into an 8-bit one.
-    let ffr = fs::read_to_string(up.join("platform/win32/FFR.cpp")).expect("read FFR.cpp");
+    let ffr = read_lf(&up.join("platform/win32/FFR.cpp"), "read FFR.cpp");
     assert!(ffr.contains("DXGI_FORMAT_R8G8B8A8_UNORM_SRGB"));
     let ffr = ffr.replace(
         "DXGI_FORMAT_R8G8B8A8_UNORM_SRGB",
@@ -48,7 +54,7 @@ fn main() {
 
     // VideoEncoderNVENC: set NVENC's split-frame mode (SDK >= 12.1) from our setting, and expose the engine count.
     // Build-time copies; the vendored upstream files stay unmodified.
-    let enc_cpp = fs::read_to_string(up.join("platform/win32/VideoEncoderNVENC.cpp")).expect("read VideoEncoderNVENC.cpp");
+    let enc_cpp = read_lf(&up.join("platform/win32/VideoEncoderNVENC.cpp"), "read VideoEncoderNVENC.cpp");
     let anchor = "    initializeParams.encodeWidth = initializeParams.darWidth = renderWidth;";
     assert!(enc_cpp.contains(anchor));
     let enc_cpp = bitdepth_compat(&enc_cpp);
@@ -79,7 +85,7 @@ fn main() {
     enc_cpp.push_str("\nint VideoEncoderNVENC::GetEncoderEngineCount() {\n    return m_NvNecoder ? m_NvNecoder->GetCapabilityValue(NV_ENC_CODEC_HEVC_GUID, NV_ENC_CAPS_NUM_ENCODER_ENGINES) : 0;\n}\n");
     let enc_cpp_path = out.join("VideoEncoderNVENC_split.cpp");
     fs::write(&enc_cpp_path, enc_cpp).unwrap();
-    let enc_h = fs::read_to_string(up.join("platform/win32/VideoEncoderNVENC.h")).expect("read VideoEncoderNVENC.h");
+    let enc_h = read_lf(&up.join("platform/win32/VideoEncoderNVENC.h"), "read VideoEncoderNVENC.h");
     assert!(enc_h.contains("    void Shutdown();"));
     fs::write(
         out.join("VideoEncoderNVENC.h"),
@@ -88,7 +94,7 @@ fn main() {
     .unwrap();
     // NvEncoder.h: public accessors for the session handle and API table (the benchmark registers the reconstructed-frame surface
     // on NVENC's own session). Its includers are copied next to it so every quoted include resolves to the same copies.
-    let nv_h = fs::read_to_string(up.join("platform/win32/NvEncoder.h")).expect("read NvEncoder.h");
+    let nv_h = read_lf(&up.join("platform/win32/NvEncoder.h"), "read NvEncoder.h");
     let acc_anchor = "    uint32_t GetEncoderBufferCount() const { return m_nEncoderBuffer; }";
     assert!(nv_h.contains(acc_anchor), "NvEncoder.h accessor anchor not found");
     fs::write(
@@ -101,7 +107,7 @@ fn main() {
     }
 
     // SDK 12.2 replaced pixelBitDepthMinus8 / inputPixelBitDepthMinus8 with outputBitDepth / inputBitDepth.
-    let nv = fs::read_to_string(up.join("platform/win32/NvEncoder.cpp")).expect("read NvEncoder.cpp");
+    let nv = read_lf(&up.join("platform/win32/NvEncoder.cpp"), "read NvEncoder.cpp");
     let nv = bitdepth_compat(&nv);
     // include the driver's own explanation (nvEncGetLastErrorString) when initialization is rejected
     let init_call = "NVENC_API_CALL(m_nvenc.nvEncInitializeEncoder(m_hEncoder, &m_initializeParams));";
