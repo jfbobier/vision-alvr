@@ -210,12 +210,24 @@ impl log::Log for AlvrLogger {
             return;
         }
         let msg = format!("{}", record.args());
+        // The headset's raw per-frame report (patched into server_core's report_statistics: tools/patches/client-stats-log.patch):
+        // one CSV row per frame the headset displayed, keyed by the frame's timestamp so it joins with host_frames.csv.
+        if let Some(inner) = msg.strip_prefix("{\"va_client_stats\":").and_then(|s| s.strip_suffix('}')) {
+            if let Ok(v) = serde_json::from_str::<Value>(inner) {
+                let ms = |k: &str| v[k].as_f64().unwrap_or(0.0) / 1000.0;
+                csv("client_frames.csv",
+                    "t_recv,ts_ns,frame_interval_ms,decode_ms,decoder_queue_ms,client_comp_ms,vsync_queue_ms,total_ms",
+                    &format!("{:.6},{},{:.3},{:.3},{:.3},{:.3},{:.3},{:.3}", qpc_now(), v["ts"].as_u64().unwrap_or(0), ms("frame_interval_us"),
+                        ms("decode_us"), ms("decoder_queue_us"), ms("rendering_us"), ms("vsync_queue_us"), ms("total_us")));
+            }
+            return;
+        }
         if msg.starts_with('{') && msg.ends_with('}') {
             match serde_json::from_str::<EventType>(&msg) {
                 Ok(EventType::GraphStatistics(g)) => {
                     client_stats::graph(&g); // per frame: aggregated for the windows
                     // and one CSV row per frame the headset reported (debug mode): the client side of the timeline
-                    csv("client_frames.csv",
+                    csv("client_graph.csv",
                         "t_recv,total_ms,game_ms,server_comp_ms,encode_ms,network_ms,decode_ms,decoder_queue_ms,client_comp_ms,vsync_queue_ms,client_fps,server_fps,bitrate_mbps",
                         &format!("{:.6},{:.2},{:.2},{:.2},{:.2},{:.2},{:.2},{:.2},{:.2},{:.3},{:.1},{:.1},{:.1}", qpc_now(),
                             g.total_pipeline_latency_s * 1000.0, g.game_time_s * 1000.0, g.server_compositor_s * 1000.0, g.encoder_s * 1000.0,

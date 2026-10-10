@@ -20,7 +20,7 @@ def load(path):
         try:
             out.append({k: (float(v) if v not in ('', None) else 0.0) for k, v in r.items()})
         except ValueError:
-            pass
+            pass  # a repeated header line (the shim re-opens its CSV when the debug folder is re-announced)
     return out
 
 def pct(v, q):
@@ -114,6 +114,31 @@ def main(d):
                     ph.append(t - arr[i])
             dist('tick after latest tracking packet', ph)
 
+    cg = load(os.path.join(d, 'client_graph.csv')) if os.path.exists(os.path.join(d, 'client_graph.csv')) else []
+    if cf and 'ts_ns' in cf[0]:
+        print('\nHeadset per-frame statistics (raw, by frame timestamp)')
+        for k in ('frame_interval_ms', 'decode_ms', 'decoder_queue_ms', 'client_comp_ms', 'total_ms'):
+            dist(k, [r[k] for r in cf], scale=1.0)
+        vq = [r['vsync_queue_ms'] for r in cf]
+        sane = [v for v in vq if 0 <= v < 1000]
+        print(f'  {"vsync_queue (sane)":42s} p05 {pct(sane, .05):7.2f}  p50 {pct(sane, .5):7.2f}  p95 {pct(sane, .95):7.2f} ms; late (wrapped): {len(vq) - len(sane)}')
+        shown = [int(r['ts_ns']) for r in cf]
+        import collections
+        sst = collections.Counter()
+        for a, b in zip(shown, shown[1:]):
+            sst[max(-2, min(4, round((b - a) / 11.111e6)))] += 1
+        tot = sum(sst.values())
+        print('  displayed-frame stamp step: ' + ', '.join(f'{k:+d}: {v} ({100 * v / tot:.1f}%)' for k, v in sorted(sst.items())))
+        if hf:
+            sent = {int(r['ts_ns']) for r in hf if r['ts_ns'] > 0}
+            print(f'  sent frames never reported displayed: {len(sent - set(shown))} / {len(sent)} ({100 * len(sent - set(shown)) / max(1, len(sent)):.1f}%)')
+            tsend = {int(r['ts_ns']): r['t_send'] for r in hf}
+            rt = [r['t_recv'] - tsend[int(r['ts_ns'])] for r in cf if int(r['ts_ns']) in tsend]
+            dist('video send -> statistics arrival (round trip)', rt)
+        recv = sorted(r['t_recv'] for r in cf)
+        dist('report interval (displayed-frame spacing)', [b - a for a, b in zip(recv, recv[1:]) if 0 < b - a < 0.2])
+        print(f'  report gaps > 16.5 ms: {sum(1 for a, b in zip(recv, recv[1:]) if b - a > 0.0165)}')
+        cf = cg
     if cf:
         print('\nHeadset per-frame statistics (what the client reports)')
         for k in ('total_ms', 'game_ms', 'network_ms', 'decode_ms', 'decoder_queue_ms', 'client_comp_ms'):

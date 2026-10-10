@@ -1322,11 +1322,11 @@ namespace {
                     m_statTicks0 = m_lastSignaledVsync;
                     ShimLog("frames %llu: %.1f fps, vsync %.1f Hz (host %u events, %u local timeouts), last compose+GPU %.2f ms, "
                             "layers %d, ts matched %u (by display time %llu) / fallback %u; vsync ticks %lld, "
-                            "WaitToBeginFrame calls %llu (waited %llu, repeated index %llu, timeouts %llu)",
+                            "WaitToBeginFrame calls %llu (waited %llu, repeated index %llu, timeouts %llu); publish drops %u",
                             (unsigned long long)m_framesSubmitted, fps, rate, (unsigned)m_vsyncFromHost, (unsigned)m_vsyncTimeouts,
                             st.lastComposeMs, composed, st.tsMatched, (unsigned long long)m_tsByDisplayTime, st.tsFallback,
                             m_lastSignaledVsync, (unsigned long long)m_waitCalls, (unsigned long long)m_waitWaited,
-                            (unsigned long long)m_waitRepeatedIndex, (unsigned long long)m_waitTimeouts);
+                            (unsigned long long)m_waitRepeatedIndex, (unsigned long long)m_waitTimeouts, m_diagPublishDropped);
                     auto pct = [](std::vector<float>& v, double q) {
                         if (v.empty()) {
                             return 0.0f;
@@ -1370,8 +1370,13 @@ namespace {
                     // (CPU and GPU work serialised: a 6 ms CPU + 8 ms GPU frame drops from 90 to 45 fps). Like a real compositor,
                     // return now: DXGI signals an event when the GPU is done and the publisher thread hands the frame to the host.
                     std::unique_lock lock(m_publishMutex);
-                    // at most 2 frames in flight (the ring has 4 slots; the host may be encoding a third)
-                    m_publishCv.wait_for(lock, std::chrono::milliseconds(50), [&] { return m_publishQueue.size() < 2; });
+                    // Never block here: VDXR's async submission thread calls us, and the app's xrEndFrame waits for that thread,
+                    // so a wait on the GPU (a game with a deep GPU queue) or on the host would stall the game. With 3 frames
+                    // already in flight (the ring has 4 slots) the oldest one not being published is dropped instead.
+                    while (m_publishQueue.size() >= 3) {
+                        m_publishQueue.erase(m_publishQueue.begin() + 1);
+                        m_diagPublishDropped++;
+                    }
                     ResetEvent(m_gpuDone[slot]);
                     if (FAILED(m_dxgiDevice2->EnqueueSetEvent(m_gpuDone[slot]))) {
                         // still hand it to the publisher (the only thread that publishes while it runs), already complete
@@ -1469,7 +1474,10 @@ namespace {
                         WriteFrameRow(f.row, gpuDone, QpcSeconds());
                         {
                             std::unique_lock lock(m_publishMutex);
-                            m_publishQueue.pop_front();
+                            // the submission thread may have dropped entries behind us: pop only the one we published
+                            if (!m_publishQueue.empty() && m_publishQueue.front().slot == f.slot && m_publishQueue.front().clientTs == f.clientTs) {
+                                m_publishQueue.pop_front();
+                            }
                         }
                         m_publishCv.notify_all();
                     }
@@ -2206,6 +2214,7 @@ namespace {
         uint64_t m_lastStampTs{0};       // client timestamp the previous frame was stamped with
         std::vector<float> m_diagWarpMdeg, m_diagWarpAgeMs, m_diagFreshWaitMs; // stampMode 1 diagnostics
         uint32_t m_diagFreshWaits{0}, m_diagStillStale{0};
+        uint32_t m_diagPublishDropped{0}; // frames dropped before publish because 3 were already in flight (never blocks the game)
         // stampMode 2: head velocity from the tracking samples and the extrapolation horizon (see GetHmdPose)
         struct SampleRef {
             uint64_t clientTsNs{0};

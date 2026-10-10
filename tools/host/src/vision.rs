@@ -35,6 +35,12 @@ pub struct Settings {
     pub split_encode: Option<String>,
     /// "asap" (default) or "vsync": hold each encoded frame until the next display-clock tick before sending it
     pub send_pacing: Option<String>,
+    /// "slot" pacing: the frame goes out at display-clock tick + this offset (ms)
+    pub send_offset_ms: Option<f64>,
+    /// "slot" pacing: adjust the offset so the headset's decoder queue dwell sits mid-slot (default true)
+    pub send_offset_auto: Option<bool>,
+    /// "slot" pacing: start encoding this long before the slot so the packet is ready at the slot (ms)
+    pub encode_lead_ms: Option<f64>,
     /// "predict" (default): like "newest" plus the pose handed to the app is extrapolated to the expected stamp time; "newest": frames stamped with
     /// the newest tracking sample, projection layers rotated to it; "match": the sample the app rendered with
     pub stamp: Option<String>,
@@ -62,6 +68,9 @@ pub fn load_settings(path: &Path) -> Settings {
         qp_map: video["qp_map"].as_bool(),
         split_encode: video["split_encode"].as_str().map(str::to_string),
         send_pacing: video["send_pacing"].as_str().map(str::to_string),
+        send_offset_ms: video["send_offset_ms"].as_f64(),
+        send_offset_auto: video["send_offset_auto"].as_bool(),
+        encode_lead_ms: video["encode_lead_ms"].as_f64(),
         stamp: video["stamp"].as_str().map(str::to_string),
         fresh_wait_ms: video["fresh_wait_ms"].as_f64(),
         pacing: video["pacing"].as_str().map(str::to_string),

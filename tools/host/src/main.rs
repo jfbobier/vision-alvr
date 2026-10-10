@@ -55,6 +55,11 @@ struct Args {
     /// hold each encoded app frame until the next display-clock tick before sending it (ALVR's SteamVR driver sends on
     /// its vsync grid; see the `send_on_vsync` handling in the main loop)
     send_on_vsync: bool,
+    /// compositor semantics: deliver on the display grid (tick + send_offset_ms), newest frame wins, older unencoded frames skipped
+    send_slot: bool,
+    send_offset_ms: f64,
+    send_offset_auto: bool,
+    encode_lead_ms: f64,
     send_pacing_explicit: bool,
     /// 0: frames stamped with the sample the app rendered with; 1: newest sample + projection layers rotated to it; 2: 1 + the pose
     /// handed to the app is extrapolated to the expected stamp time
@@ -125,6 +130,10 @@ fn parse_args() -> Result<Args, String> {
         // min(3, engines) strips, so this is also right on 1- and 2-engine GPUs.
         split_encode: 3,
         send_on_vsync: false,
+        send_slot: false,
+        send_offset_ms: 0.5,
+        send_offset_auto: true,
+        encode_lead_ms: 4.0,
         send_pacing_explicit: false,
         stamp_mode: 2,
         stamp_explicit: false,
@@ -221,8 +230,11 @@ fn parse_args() -> Result<Args, String> {
             }
             "--send-pacing" => {
                 a.send_pacing_explicit = true;
-                a.send_on_vsync = parse_send_pacing(&v()?)?;
+                let m = parse_send_pacing(&v()?)?;
+                a.send_on_vsync = m == 1;
+                a.send_slot = m == 2;
             }
+            "--send-offset-ms" => a.send_offset_ms = v()?.parse().map_err(|e| format!("{e}"))?,
             "--stamp" => {
                 a.stamp_explicit = true;
                 a.stamp_mode = parse_stamp(&v()?)?;
@@ -323,20 +335,41 @@ fn parse_pacing(s: &str) -> Result<bool, String> {
     }
 }
 
-fn parse_send_pacing(s: &str) -> Result<bool, String> {
+fn parse_send_pacing(s: &str) -> Result<i32, String> {
     match s {
-        "vsync" | "tick" => Ok(true),
-        "asap" | "off" => Ok(false),
-        o => Err(format!("--send-pacing asap|vsync, got {o}")),
+        "slot" | "grid" => Ok(2),
+        "vsync" | "tick" => Ok(1),
+        "asap" | "off" => Ok(0),
+        o => Err(format!("--send-pacing asap|vsync|slot, got {o}")),
+    }
+}
+
+fn send_pacing_name(a: &Args) -> &'static str {
+    if a.send_slot {
+        "slot"
+    } else if a.send_on_vsync {
+        "vsync"
+    } else {
+        "asap"
     }
 }
 
 /// Fills what the command line left open from `config/visionalvr.json`, then applies the encode profile's implications.
 fn apply_settings(a: &mut Args, st: &vision::Settings) {
     if !a.send_pacing_explicit {
-        if let Some(p) = st.send_pacing.as_deref().and_then(|p| parse_send_pacing(p).ok()) {
-            a.send_on_vsync = p;
+        if let Some(m) = st.send_pacing.as_deref().and_then(|p| parse_send_pacing(p).ok()) {
+            a.send_on_vsync = m == 1;
+            a.send_slot = m == 2;
         }
+    }
+    if let Some(o) = st.send_offset_ms {
+        a.send_offset_ms = o.clamp(0.0, 11.0);
+    }
+    if let Some(b) = st.send_offset_auto {
+        a.send_offset_auto = b;
+    }
+    if let Some(l) = st.encode_lead_ms {
+        a.encode_lead_ms = l.clamp(0.0, 8.0);
     }
     if !a.stamp_explicit {
         if let Some(p) = st.stamp.as_deref().and_then(|p| parse_stamp(p).ok()) {
@@ -447,6 +480,13 @@ static LAST_TICK_QPC: AtomicU64 = AtomicU64::new(0); // f64 bits, QPC seconds (s
 static NEXT_TICK_NS: AtomicU64 = AtomicU64::new(0);
 /// app frames sent with the same client timestamp as the previous frame (the headset treats them as already shown)
 static SAME_TS_FRAMES: AtomicU64 = AtomicU64::new(0);
+/// slot pacing: frames skipped (never encoded) because a newer one arrived before the delivery slot
+static SLOT_SKIPPED: AtomicU64 = AtomicU64::new(0);
+/// slot pacing: the current send offset after the tick (f64 bits, ms) and whether the stats windows may adjust it
+static SEND_OFFSET_MS: AtomicU64 = AtomicU64::new(0);
+static SEND_OFFSET_AUTO: AtomicBool = AtomicBool::new(false);
+/// the headset's decoder-queue dwell the auto offset aims at: mid-slot, so early and late arrivals are tolerated alike
+const SLOT_TARGET_DWELL_MS: f64 = 5.5;
 /// send instant relative to the display-clock tick (asap: render + encode time; vsync pacing: lateness after the tick)
 static SEND_PHASE_MS: std::sync::Mutex<Vec<f64>> = std::sync::Mutex::new(Vec::new());
 /// time an encoded frame waited for the tick (vsync pacing only; 0 = the frame was already late)
@@ -626,10 +666,25 @@ impl StatsWindow {
                 "ts_matched": matched.wrapping_sub(self.matched0), "ts_fallback": fallback.wrapping_sub(self.fallback0) });
         }
         if let Some(c) = logs::client_stats::take(0) {
+            if SEND_OFFSET_AUTO.load(Ordering::Relaxed) {
+                // slot pacing: steer the send offset so frames become ready mid-slot at the headset (its decoder-queue dwell
+                // is the time from decode to the pick-up poll: too long = we send too early, too short = too late)
+                if let (Some(dq), Some(n)) = (c["decoder_queue_ms"].as_f64(), c["samples"].as_u64()) {
+                    if n >= 30 && dq > 0.0 && dq < 40.0 {
+                        let period_ms = (NEXT_TICK_NS.load(Ordering::Relaxed).saturating_sub(LAST_TICK_NS.load(Ordering::Relaxed)) as f64 / 1e6).clamp(5.0, 20.0);
+                        let dwell = dq % period_ms; // a frame queued behind another one shows one extra period
+                        let off = f64::from_bits(SEND_OFFSET_MS.load(Ordering::Relaxed));
+                        let new = (off + 0.3 * (dwell - SLOT_TARGET_DWELL_MS)).rem_euclid(period_ms);
+                        SEND_OFFSET_MS.store(new.to_bits(), Ordering::Relaxed);
+                    }
+                }
+            }
+            e["send_offset_ms"] = json!(f64::from_bits(SEND_OFFSET_MS.load(Ordering::Relaxed)));
             e["client"] = c; // ALVR's client statistics over the window: total / encode / network / decode latency, client fps
         }
         // pacing diagnostics (moving-head judder investigation): duplicate timestamps, tracking spacing, send phase
         e["same_ts_frames"] = json!(SAME_TS_FRAMES.swap(0, Ordering::Relaxed));
+        e["slot_skipped"] = json!(SLOT_SKIPPED.swap(0, Ordering::Relaxed));
         if let Ok(mut g) = TRACKING_GAP_MS.lock() {
             if !g.is_empty() {
                 let mut v = std::mem::take(&mut *g);
@@ -1503,7 +1558,7 @@ fn main() {
         let data = json!({ "frames": n, "avg_ms": avg, "p50_ms": p50, "p95_ms": p95, "min_ms": v.iter().cloned().fold(f64::MAX, f64::min),
             "max_ms": v.iter().cloned().fold(0.0, f64::max), "width": enc_size.0, "height": enc_size.1, "profile": format!("{:?}", args.encode_profile),
             "split_encode_mode": args.split_encode, "nvenc_engines": unsafe { nvh::nvh_encoder_engines(enc_handle) },
-            "send_pacing": if args.send_on_vsync { "vsync" } else { "asap" },
+            "send_pacing": send_pacing_name(&args), "send_offset_ms": args.send_offset_ms,
             "stamp": stamp_name(args.stamp_mode), "fresh_wait_ms": args.fresh_wait_ms,
             "pacing": if args.pacing_tracking { "tracking" } else { "grid" }, "pacing_guard_ms": args.pacing_guard_ms,
             "slices_per_frame": live.as_ref().map(|l| l.slices as f64 / l.slice_samples.max(1) as f64),
@@ -1801,13 +1856,15 @@ fn main() {
     if !ipc.is_null() {
         push_user(ipc, user_gamma, debug_on);
         unsafe { nvh::nvh_ipc_set_pacing(ipc, args.stamp_mode, args.fresh_wait_ms as f32, args.render_scale as f32) };
+        SEND_OFFSET_MS.store(args.send_offset_ms.to_bits(), Ordering::Relaxed);
+        SEND_OFFSET_AUTO.store(args.send_slot && args.send_offset_auto, Ordering::Relaxed);
         event(origin, "pacing_config", json!({ "stamp": stamp_name(args.stamp_mode), "fresh_wait_ms": args.fresh_wait_ms, "render_scale": args.render_scale,
+            "send_offset_auto": args.send_offset_auto, "encode_lead_ms": args.encode_lead_ms,
             "pacing": if args.pacing_tracking { "tracking" } else { "grid" }, "pacing_guard_ms": args.pacing_guard_ms,
-            "send_pacing": if args.send_on_vsync { "vsync" } else { "asap" } }));
+            "send_pacing": send_pacing_name(&args), "send_offset_ms": args.send_offset_ms }));
         logs::general("INFO", &format!("frame stamping: {} (fresh wait {:.1} ms); display clock: {} (guard {:.1} ms); send pacing: {}",
             match args.stamp_mode { 2 => "newest sample + rotation + pose extrapolation", 1 => "newest sample + rotation", _ => "rendered sample (pose match)" }, args.fresh_wait_ms,
-            if args.pacing_tracking { "locked to headset tracking" } else { "ALVR grid" }, args.pacing_guard_ms,
-            if args.send_on_vsync { "vsync" } else { "asap" }));
+            if args.pacing_tracking { "locked to headset tracking" } else { "ALVR grid" }, args.pacing_guard_ms, send_pacing_name(&args)));
     }
     struct GameRun {
         exe: String,
@@ -2090,6 +2147,45 @@ fn main() {
                 intake_ms.push(intake.duration_since(l).as_secs_f64() * 1000.0);
             }
             last_intake = Some(intake);
+            let mut slot_deadline: Option<Instant> = None;
+            if args.send_slot {
+                // Compositor semantics (what SteamVR's compositor gives ALVR): frames leave on the display grid, at
+                // tick + send_offset_ms, one per slot, newest wins. A frame ready between two grid points waits for the next
+                // one; if a newer frame arrives while it waits, the older one is skipped before it is encoded (the headset's
+                // 2-deep queue would have dropped one of them anyway, after decoding both).
+                let period = Duration::from_nanos(NEXT_TICK_NS.load(Ordering::Relaxed).saturating_sub(LAST_TICK_NS.load(Ordering::Relaxed)).clamp(5_000_000, 20_000_000));
+                let offset = Duration::from_secs_f64(f64::from_bits(SEND_OFFSET_MS.load(Ordering::Relaxed)) / 1000.0);
+                let lead = Duration::from_secs_f64(args.encode_lead_ms / 1000.0);
+                let mut deadline = origin + Duration::from_nanos(LAST_TICK_NS.load(Ordering::Relaxed)) + offset;
+                let now0 = Instant::now();
+                // the next slot; encoding starts `lead` before it (or right away when the slot is closer than that, the
+                // packet then goes out as soon as it is ready, a little late rather than a whole slot later)
+                while deadline <= now0 {
+                    deadline += period;
+                }
+                slot_deadline = Some(deadline);
+                let encode_at = if deadline.saturating_duration_since(now0) > lead { deadline - lead } else { now0 };
+                let mut skipped = 0u32;
+                loop {
+                    let left = encode_at.saturating_duration_since(Instant::now());
+                    if left.is_zero() {
+                        break;
+                    }
+                    let (mut c2, mut s2, mut t2, mut sub2) = (0u64, 0u32, 0u64, 0f64);
+                    let wait_ms = if left > Duration::from_millis(2) { 1 } else { 0 };
+                    if unsafe { nvh::nvh_ipc_wait_frame(ipc, wait_ms, &mut c2, &mut s2, &mut t2, &mut sub2) } != 0 {
+                        counter = c2;
+                        slot = s2;
+                        cts = t2;
+                        submit_s = sub2;
+                        skipped += 1;
+                    } else if wait_ms == 0 {
+                        std::hint::spin_loop();
+                    }
+                }
+                SLOT_SKIPPED.fetch_add(skipped as u64, Ordering::Relaxed);
+                push_bounded(&HOLD_MS, deadline.saturating_duration_since(now0).as_secs_f64() * 1000.0);
+            }
             let ts = if cts != 0 {
                 Duration::from_nanos(cts)
             } else {
@@ -2112,7 +2208,7 @@ fn main() {
             l.packet_bytes = 0;
             l.packet_idr = false;
             l.pending.clear();
-            l.hold_now = args.send_on_vsync;
+            l.hold_now = args.send_on_vsync || slot_deadline.is_some();
             let frame_no = shared.frames_sent.load(Ordering::Relaxed);
             // Real timings for ALVR's statistics: the app presented (submitted) the frame at submit_s, the shim finished
             // composing it then, and the encoder starts now.
@@ -2131,7 +2227,14 @@ fn main() {
                 }
                 continue;
             }
-            if args.send_on_vsync {
+            if let Some(deadline) = slot_deadline {
+                // the packet is ready: send it exactly at the slot (or at once if encoding ran past it)
+                if deadline > Instant::now() {
+                    sleep_spin_until(deadline);
+                }
+                flush_pending(l);
+                push_bounded(&SEND_PHASE_MS, Instant::now().saturating_duration_since(deadline).as_secs_f64() * 1000.0);
+            } else if args.send_on_vsync {
                 // Send on the display clock, like ALVR's SteamVR driver (the compositor presents at vsync and the driver sleeps
                 // until the next grid point after each Present): the headset then sees a regular cadence instead of
                 // tick + render time + encode time. A frame that is already past the tick goes out at once.
@@ -2151,7 +2254,7 @@ fn main() {
             }
             {
                 // the host side of the per-frame timeline (debug mode), same clock as the shim's frames CSV
-                let hold_ms = HOLD_MS.lock().ok().and_then(|h| h.last().copied()).filter(|_| args.send_on_vsync).unwrap_or(0.0);
+                let hold_ms = HOLD_MS.lock().ok().and_then(|h| h.last().copied()).filter(|_| args.send_on_vsync || args.send_slot).unwrap_or(0.0);
                 logs::csv("host_frames.csv", "frame,ts_ns,t_tick,t_intake,t_submit,encode_ms,t_send,hold_ms,bytes,idr",
                     &format!("{counter},{},{:.6},{:.6},{:.6},{ms:.2},{:.6},{hold_ms:.2},{},{}", ts.as_nanos(),
                         f64::from_bits(LAST_TICK_QPC.load(Ordering::Relaxed)), logs::qpc_at(intake), submit_s, logs::qpc_now(),
