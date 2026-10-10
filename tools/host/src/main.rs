@@ -60,6 +60,8 @@ struct Args {
     send_offset_ms: f64,
     send_offset_auto: bool,
     encode_lead_ms: f64,
+    slot_boundary_ms: f64,
+    gpu_sched_class: i64,
     send_pacing_explicit: bool,
     /// 0: frames stamped with the sample the app rendered with; 1: newest sample + projection layers rotated to it; 2: 1 + the pose
     /// handed to the app is extrapolated to the expected stamp time
@@ -134,6 +136,8 @@ fn parse_args() -> Result<Args, String> {
         send_offset_ms: 0.5,
         send_offset_auto: true,
         encode_lead_ms: 4.0,
+        slot_boundary_ms: 10.0,
+        gpu_sched_class: 5,
         send_pacing_explicit: false,
         stamp_mode: 2,
         stamp_explicit: false,
@@ -371,6 +375,12 @@ fn apply_settings(a: &mut Args, st: &vision::Settings) {
     if let Some(l) = st.encode_lead_ms {
         a.encode_lead_ms = l.clamp(0.0, 8.0);
     }
+    if let Some(b) = st.slot_boundary_ms {
+        a.slot_boundary_ms = b.clamp(0.0, 11.0);
+    }
+    if let Some(c) = st.gpu_sched_class {
+        a.gpu_sched_class = c.clamp(0, 5);
+    }
     if !a.stamp_explicit {
         if let Some(p) = st.stamp.as_deref().and_then(|p| parse_stamp(p).ok()) {
             a.stamp_mode = p;
@@ -487,6 +497,8 @@ static SLOT_FILLED: AtomicU64 = AtomicU64::new(0);
 /// per stats window copies (the guard steering only acts while the stream is regular)
 static SLOT_SKIPPED_WINDOW: AtomicU64 = AtomicU64::new(0);
 static SLOT_FILLED_WINDOW: AtomicU64 = AtomicU64::new(0);
+/// slots whose boundary had already passed when the loop reached it (the previous slot's encode ran long)
+static SLOT_LATE: AtomicU64 = AtomicU64::new(0);
 /// slot pacing: the current send offset after the tick (f64 bits, ms) and whether the stats windows may adjust it
 static SEND_OFFSET_MS: AtomicU64 = AtomicU64::new(0);
 static SEND_OFFSET_AUTO: AtomicBool = AtomicBool::new(false);
@@ -496,21 +508,26 @@ static COMPLETION_PHASE_MS: AtomicU64 = AtomicU64::new(0);
 /// the display clock's guard after the estimated tracking arrival (ns): steered from the headset's queue dwell
 static PLL_GUARD_NS: AtomicU64 = AtomicU64::new(2_000_000);
 
-/// Slot pacing: (encode start, send deadline) of the slot a frame ready now goes into. The encode boundary is the app's
-/// completion phase + half a period (or `send_offset_ms` when the automatic placement is off); the send is `lead` later.
-fn slot_times(now: Instant, origin: Instant, lead: Duration) -> (Instant, Instant) {
-    let period_ns = NEXT_TICK_NS.load(Ordering::Relaxed).saturating_sub(LAST_TICK_NS.load(Ordering::Relaxed)).clamp(5_000_000, 20_000_000);
-    let period = Duration::from_nanos(period_ns);
-    let boundary_ms = if SEND_OFFSET_AUTO.load(Ordering::Relaxed) {
-        (f64::from_bits(COMPLETION_PHASE_MS.load(Ordering::Relaxed)) + period_ns as f64 / 2e6).rem_euclid(period_ns as f64 / 1e6)
-    } else {
-        f64::from_bits(SEND_OFFSET_MS.load(Ordering::Relaxed))
-    };
-    let mut encode_at = origin + Duration::from_nanos(LAST_TICK_NS.load(Ordering::Relaxed)) + Duration::from_secs_f64(boundary_ms / 1000.0);
-    while encode_at <= now {
-        encode_at += period;
+/// Slot pacing: the encode boundary after each display tick (ms, f64 bits). Fixed within a stats window; when adaptive it
+/// moves at most 1 ms per window towards (app completion phase + half a period), so the boundary grid stays regular.
+static SLOT_BOUNDARY_MS: AtomicU64 = AtomicU64::new(0);
+
+fn slot_period() -> Duration {
+    Duration::from_nanos(NEXT_TICK_NS.load(Ordering::Relaxed).saturating_sub(LAST_TICK_NS.load(Ordering::Relaxed)).clamp(5_000_000, 20_000_000))
+}
+
+/// The first encode boundary of the slot grid (tick + boundary offset + k periods) strictly after `after`.
+fn slot_grid_next(after: Instant, origin: Instant) -> Instant {
+    let period = slot_period();
+    let mut b = origin + Duration::from_nanos(LAST_TICK_NS.load(Ordering::Relaxed)) + Duration::from_secs_f64(f64::from_bits(SLOT_BOUNDARY_MS.load(Ordering::Relaxed)) / 1000.0);
+    // the grid is anchored on the latest tick: walk back/forward to the first point after `after`
+    while b > after + period {
+        b -= period;
     }
-    (encode_at, encode_at + lead)
+    while b <= after {
+        b += period;
+    }
+    b
 }
 /// the headset decoder-queue dwell the guard steering aims at (ms)
 const SLOT_TARGET_DWELL_MS: f64 = 10.0; // SteamVR + ALVR sits here: a late frame shifts the headset one slot, an early one costs nothing
@@ -727,6 +744,18 @@ impl StatsWindow {
                 SLOT_SKIPPED_WINDOW.store(0, Ordering::Relaxed);
                 SLOT_FILLED_WINDOW.store(0, Ordering::Relaxed);
             }
+            if SEND_OFFSET_AUTO.load(Ordering::Relaxed) {
+                // move the encode boundary towards half a period after the app's completion phase, at most 1 ms per window
+                let period_ms = slot_period().as_secs_f64() * 1000.0;
+                let target = (f64::from_bits(COMPLETION_PHASE_MS.load(Ordering::Relaxed)) + period_ms / 2.0).rem_euclid(period_ms);
+                let cur = f64::from_bits(SLOT_BOUNDARY_MS.load(Ordering::Relaxed));
+                let err = ((target - cur + period_ms / 2.0).rem_euclid(period_ms)) - period_ms / 2.0;
+                let step = err.clamp(-1.0, 1.0);
+                if err.abs() > 0.5 {
+                    SLOT_BOUNDARY_MS.store((cur + step).rem_euclid(period_ms).to_bits(), Ordering::Relaxed);
+                }
+            }
+            e["slot_boundary_ms"] = json!(f64::from_bits(SLOT_BOUNDARY_MS.load(Ordering::Relaxed)));
             e["send_offset_ms"] = json!(f64::from_bits(SEND_OFFSET_MS.load(Ordering::Relaxed)));
             e["completion_phase_ms"] = json!(f64::from_bits(COMPLETION_PHASE_MS.load(Ordering::Relaxed)));
             e["pacing_guard_ms"] = json!(PLL_GUARD_NS.load(Ordering::Relaxed) as f64 / 1e6);
@@ -736,6 +765,7 @@ impl StatsWindow {
         e["same_ts_frames"] = json!(SAME_TS_FRAMES.swap(0, Ordering::Relaxed));
         e["slot_skipped"] = json!(SLOT_SKIPPED.swap(0, Ordering::Relaxed));
         e["slot_filled"] = json!(SLOT_FILLED.swap(0, Ordering::Relaxed));
+        e["slot_late"] = json!(SLOT_LATE.swap(0, Ordering::Relaxed));
         if let Ok(mut g) = TRACKING_GAP_MS.lock() {
             if !g.is_empty() {
                 let mut v = std::mem::take(&mut *g);
@@ -925,6 +955,7 @@ mod nvh {
         pub fn nvh_ipc_app_exe(ipc: *mut c_void, buf: *mut c_char, len: i32) -> i32;
         pub fn nvh_ipc_set_color(ipc: *mut c_void, brightness: f32, contrast: f32, saturation: f32, sharpening: f32);
         pub fn nvh_ipc_set_pacing(ipc: *mut c_void, stamp_mode: i32, fresh_wait_ms: f32, render_scale: f32);
+        pub fn nvh_set_gpu_scheduling(cls: i32) -> std::ffi::c_long;
         pub fn nvh_gpu_info(buf: *mut c_char, len: i32) -> i32;
         pub fn nvh_gpu_sample(buf: *mut c_char, len: i32) -> i32;
         pub fn nvh_ipc_shim_stats(ipc: *mut c_void, submit_mode: *mut u32, ts_matched: *mut u32, ts_fallback: *mut u32);
@@ -1879,6 +1910,7 @@ fn main() {
     let mut last_app_frame: Option<(u32, Duration, u64)> = None;
     let mut last_app_frame_at = Instant::now();
     let mut fills_in_row = 0u32;
+    let mut slot_next: Option<Instant> = None;
     let mut stats_win = StatsWindow::new();
     let mut intake_ms: Vec<f64> = vec![];
     let mut last_intake: Option<Instant> = None;
@@ -1914,9 +1946,22 @@ fn main() {
         push_user(ipc, user_gamma, debug_on);
         unsafe { nvh::nvh_ipc_set_pacing(ipc, args.stamp_mode, args.fresh_wait_ms as f32, args.render_scale as f32) };
         SEND_OFFSET_MS.store(args.send_offset_ms.to_bits(), Ordering::Relaxed);
+        SLOT_BOUNDARY_MS.store(args.slot_boundary_ms.to_bits(), Ordering::Relaxed);
         SEND_OFFSET_AUTO.store(args.send_slot && args.send_offset_auto, Ordering::Relaxed);
+        // GPU scheduling class of this process (encoder + foveation passes): realtime like SteamVR's compositor when allowed
+        let mut sched = (args.gpu_sched_class, -1i64);
+        for cls in (2..=args.gpu_sched_class).rev() {
+            let st = unsafe { nvh::nvh_set_gpu_scheduling(cls as i32) } as i64;
+            sched = (cls, st);
+            if st == 0 {
+                break;
+            }
+        }
+        logs::general("INFO", &format!("GPU scheduling class {} (requested {}): status {:#x}", sched.0, args.gpu_sched_class, sched.1));
+        event(origin, "gpu_scheduling", json!({ "requested": args.gpu_sched_class, "applied": sched.0, "status": sched.1 }));
         event(origin, "pacing_config", json!({ "stamp": stamp_name(args.stamp_mode), "fresh_wait_ms": args.fresh_wait_ms, "render_scale": args.render_scale,
-            "send_offset_auto": args.send_offset_auto, "encode_lead_ms": args.encode_lead_ms,
+            "send_offset_auto": args.send_offset_auto, "encode_lead_ms": args.encode_lead_ms, "slot_boundary_ms": args.slot_boundary_ms,
+            "gpu_sched_class": args.gpu_sched_class,
             "pacing": if args.pacing_tracking { "tracking" } else { "grid" }, "pacing_guard_ms": args.pacing_guard_ms,
             "send_pacing": send_pacing_name(&args), "send_offset_ms": args.send_offset_ms }));
         logs::general("INFO", &format!("frame stamping: {} (fresh wait {:.1} ms); display clock: {} (guard {:.1} ms); send pacing: {}",
@@ -2166,7 +2211,18 @@ fn main() {
                 // regular production never straddles it. This is what SteamVR's compositor gives ALVR: one frame per vsync,
                 // the newest completed, duplicates when the app is late.
                 let lead = Duration::from_secs_f64(args.encode_lead_ms / 1000.0);
-                let (boundary, deadline) = slot_times(Instant::now(), origin, lead);
+                let now_b = Instant::now();
+                // absolute schedule: the next grid point after the previous slot, even when we are late for it (a long encode
+                // must not skip a slot; the backlog is only dropped after two periods)
+                let boundary = match slot_next {
+                    Some(b) if now_b < b + 2 * slot_period() => b,
+                    _ => slot_grid_next(now_b, origin),
+                };
+                slot_next = Some(slot_grid_next(boundary, origin));
+                let deadline = boundary + lead;
+                if now_b > boundary + Duration::from_micros(500) {
+                    SLOT_LATE.fetch_add(1, Ordering::Relaxed);
+                }
                 let mut skipped = 0u32;
                 have_frame = false;
                 loop {

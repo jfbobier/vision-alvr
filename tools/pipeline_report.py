@@ -101,6 +101,9 @@ def main(d):
         print('\nHost send cadence')
         sends = sorted(r['t_send'] for r in hf)
         dist('send interval', [b - a for a, b in zip(sends, sends[1:]) if 0 < b - a < 0.2])
+        ins = sorted(r['t_intake'] for r in hf)
+        dist('intake (slot boundary) spacing', [b - a for a, b in zip(ins, ins[1:]) if 0 < b - a < 0.2])
+        dist('intake -> send (encode + hold)', [r['t_send'] - r['t_intake'] for r in hf if r['t_send'] >= r['t_intake']])
         ticks = sorted(set(r['t_tick'] for r in hf if r['t_tick'] > 0))
         dist('tick interval', [b - a for a, b in zip(ticks, ticks[1:]) if 0 < b - a < 0.2])
         if tr:

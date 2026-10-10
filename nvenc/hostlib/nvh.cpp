@@ -543,6 +543,18 @@ void nvh_ipc_set_user(void* i, float user_gamma, int debug_on, const wchar_t* de
     h.debugOn = debug_on ? 1 : 0;
 }
 
+// Process-wide GPU scheduling class (D3DKMT): 0 idle .. 4 high, 5 realtime (needs the increase-base-priority privilege,
+// i.e. an elevated host). SteamVR's compositor runs realtime, so its copy/encode never queues behind the game's GPU work;
+// IDXGIDevice::SetGPUThreadPriority (gpu_thread_priority) measured no effect. Returns the NTSTATUS (0 = success).
+long nvh_set_gpu_scheduling(int cls) {
+    typedef long(APIENTRY * PFN)(HANDLE, int);
+    HMODULE gdi = LoadLibraryW(L"gdi32.dll");
+    if (!gdi) return -1;
+    PFN fn = (PFN)GetProcAddress(gdi, "D3DKMTSetProcessSchedulingPriorityClass");
+    if (!fn) return -2;
+    return fn(GetCurrentProcess(), std::max(0, std::min(5, cls)));
+}
+
 void nvh_ipc_set_pacing(void* i, int stamp_mode, float fresh_wait_ms, float render_scale) {
     auto& h = ((Ipc*)i)->state->host;
     h.freshWaitMs = fresh_wait_ms; h.renderScale = render_scale; MemoryBarrier(); h.stampMode = stamp_mode;

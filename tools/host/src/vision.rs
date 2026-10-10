@@ -37,8 +37,12 @@ pub struct Settings {
     pub send_pacing: Option<String>,
     /// "slot" pacing: the frame goes out at display-clock tick + this offset (ms)
     pub send_offset_ms: Option<f64>,
-    /// "slot" pacing: adjust the offset so the headset's decoder queue dwell sits mid-slot (default true)
+    /// "slot" pacing: adapt the encode boundary to the app's frame-completion phase (default true)
     pub send_offset_auto: Option<bool>,
+    /// "slot" pacing: encode boundary after the display tick (ms); the start value when adaptive (default 10)
+    pub slot_boundary_ms: Option<f64>,
+    /// process GPU scheduling class 0..5 (5 = realtime, SteamVR's compositor level; needs an elevated host); default 5
+    pub gpu_sched_class: Option<i64>,
     /// "slot" pacing: start encoding this long before the slot so the packet is ready at the slot (ms)
     pub encode_lead_ms: Option<f64>,
     /// "predict" (default): like "newest" plus the pose handed to the app is extrapolated to the expected stamp time; "newest": frames stamped with
@@ -70,6 +74,8 @@ pub fn load_settings(path: &Path) -> Settings {
         send_pacing: video["send_pacing"].as_str().map(str::to_string),
         send_offset_ms: video["send_offset_ms"].as_f64(),
         send_offset_auto: video["send_offset_auto"].as_bool(),
+        slot_boundary_ms: video["slot_boundary_ms"].as_f64(),
+        gpu_sched_class: video["gpu_sched_class"].as_i64(),
         encode_lead_ms: video["encode_lead_ms"].as_f64(),
         stamp: video["stamp"].as_str().map(str::to_string),
         fresh_wait_ms: video["fresh_wait_ms"].as_f64(),

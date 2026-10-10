@@ -16,7 +16,7 @@ for r in rows:
     hs = d.get("head_step_mdeg") or {}; hm = d.get("head_step_mm") or {}
     def f(x, w=5, p=1):
         return f"{x:{w}.{p}f}" if isinstance(x, (int, float)) else " " * w
-    print(f'{r["t_ms"]/1000:7.1f}s sent {f(d["fps"])} n{d["frames"]:3d} dupTs {d.get("same_ts_frames","-"):>3} skip {d.get("slot_skipped","-"):>2} fill {d.get("slot_filled","-"):>2} phase {f(d.get("completion_phase_ms"),4)} guard {f(d.get("pacing_guard_ms"),4)} | disp {f(c.get("displayed_fps"))} smp {c.get("samples"):3d} '
+    print(f'{r["t_ms"]/1000:7.1f}s sent {f(d["fps"])} n{d["frames"]:3d} dupTs {d.get("same_ts_frames","-"):>3} skip {d.get("slot_skipped","-"):>2} fill {d.get("slot_filled","-"):>2} late {d.get("slot_late","-"):>2} bnd {f(d.get("slot_boundary_ms"),4)} phase {f(d.get("completion_phase_ms"),4)} guard {f(d.get("pacing_guard_ms"),4)} | disp {f(c.get("displayed_fps"))} smp {c.get("samples"):3d} '
           f'game {f(c.get("game_ms"))} net {f(c.get("network_ms"),4)} dq {f(c.get("decoder_queue_ms"),4)} late {c.get("vsync_late","-"):>2} | '
           f'trk p50 {f(g.get("p50"),4)} p95 {f(g.get("p95"),4)} max {f(g.get("max"),5)} >12 {g.get("over_12ms","-"):>2} >15 {g.get("over_15ms","-"):>2} | '
           f'send+tick p50 {f(sp.get("p50"),4)} p95 {f(sp.get("p95"),4)} | hold p50 {f(h.get("p50"),4)} late {h.get("late_frames","-"):>3} | '
