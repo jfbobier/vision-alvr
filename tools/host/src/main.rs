@@ -537,20 +537,31 @@ struct TrackingPll {
     anchor: Option<Instant>,
     gaps: VecDeque<f64>,
     last: Option<Instant>,
+    last_ts_ns: u64,
     updates: u64,
 }
-static PLL: std::sync::Mutex<TrackingPll> = std::sync::Mutex::new(TrackingPll { period_ns: 0.0, anchor: None, gaps: VecDeque::new(), last: None, updates: 0 });
+static PLL: std::sync::Mutex<TrackingPll> = std::sync::Mutex::new(TrackingPll { period_ns: 0.0, anchor: None, gaps: VecDeque::new(), last: None, last_ts_ns: 0, updates: 0 });
 
-/// A tracking packet arrived now. Returns this arrival's residual vs the estimated grid (ms; negative = early).
-fn pll_arrival(now: Instant) -> f64 {
+/// A tracking packet with client timestamp `ts_ns` arrived now. Returns this arrival's residual vs the estimated grid
+/// (ms; negative = early).
+fn pll_arrival(now: Instant, ts_ns: u64) -> f64 {
     let Ok(mut pll) = PLL.lock() else { return 0.0 };
     let mut residual_ms = 0.0;
     if let Some(prev) = pll.last {
         let gap = now.duration_since(prev).as_secs_f64() * 1e9;
         if gap < 60e6 {
-            pll.gaps.push_back(gap);
-            if pll.gaps.len() > 64 {
-                pll.gaps.pop_front();
+            // The period comes from the client's timestamps, which step by exact display periods (a packet delayed by the
+            // network arrives late but carries the right time): a step of k periods counts as k samples of the period.
+            if pll.last_ts_ns != 0 && ts_ns > pll.last_ts_ns {
+                let dts = (ts_ns - pll.last_ts_ns) as f64;
+                let nominal = if pll.period_ns > 0.0 { pll.period_ns } else { 1e9 / 90.0 };
+                let k = (dts / nominal).round().max(1.0);
+                if k <= 4.0 {
+                    pll.gaps.push_back(dts / k);
+                    if pll.gaps.len() > 64 {
+                        pll.gaps.pop_front();
+                    }
+                }
             }
         } else {
             // a stall: start over (the anchor would otherwise pull the grid for seconds)
@@ -559,10 +570,11 @@ fn pll_arrival(now: Instant) -> f64 {
         }
     }
     pll.last = Some(now);
+    pll.last_ts_ns = ts_ns;
     if pll.gaps.len() >= 16 {
         let mut v: Vec<f64> = pll.gaps.iter().copied().collect();
         v.sort_by(|a, b| a.partial_cmp(b).unwrap());
-        // the median gap is the display period (a late packet makes one long gap and one short one)
+        // the median timestamp step is the display period
         pll.period_ns = v[v.len() / 2].clamp(8e6, 14e6);
     } else if pll.period_ns == 0.0 {
         pll.period_ns = 1e9 / 90.0; // until 16 gaps are in: the headset rates in play are 90-100 Hz
@@ -1651,7 +1663,7 @@ fn main() {
                     ServerCoreEvent::Tracking { sample_timestamp } => {
                         let n = shared.tracking_events.fetch_add(1, Ordering::Relaxed);
                         let now_ns = origin.elapsed().as_nanos() as u64;
-                        let pll_residual_ms = pll_arrival(Instant::now());
+                        let pll_residual_ms = pll_arrival(Instant::now(), sample_timestamp.as_nanos() as u64);
                         if let Some(m) = ctx.get_device_motion(*HEAD_ID, sample_timestamp) {
                             // sample-to-sample head step (orientation in millidegrees, position in mm): the jitter of the pose
                             // stream the frames are placed by (grows with the headset's prediction horizon)
