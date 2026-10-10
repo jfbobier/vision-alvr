@@ -193,6 +193,17 @@ namespace VisionALVR
                     headset.Text = $"Headset: searching for {pairedName} ({pairedIp}) ...";
                     headset.ForeColor = Color.DarkOrange;
                     break;
+                case "headset_seen":
+                    // the streamer's discovery (mDNS) saw a headset: show it while nothing is connected; a paired headset whose
+                    // address changed is dialled by the streamer itself, keep our note of its address in step
+                    if (headset.ForeColor != Color.SeaGreen)
+                    {
+                        var seenName = S(d, "hostname"); var seenIp = S(d, "ip");
+                        var paired = pairedName.Length > 0 && (seenName == settings.HeadsetHost || seenIp == pairedIp);
+                        headset.Text = paired ? $"Headset: {pairedName} seen at {seenIp}, connecting..." : $"Headset: {seenName} seen at {seenIp} - not paired (use Configure...)";
+                        if (paired && seenIp.Length > 0 && seenIp != settings.HeadsetIp) { settings.HeadsetIp = seenIp; settings.Save(); pairedIp = seenIp; }
+                    }
+                    break;
                 case "game_started":
                     game.Text = "Game: " + S(d, "exe");
                     break;

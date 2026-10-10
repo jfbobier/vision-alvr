@@ -222,50 +222,34 @@ namespace VisionALVR
         }
     }
 
-    /// ALVR's LAN discovery: the headset broadcasts 56-byte UDP packets to port 9943: "ALVR", zeros to byte 16, protocol id
-    /// (u64 LE), hostname (32 bytes). Only one program can listen: the host does the same while it runs.
+    /// Headset discovery, done by alvr_host.exe (`--discover`, ALVR's own code: mDNS/Bonjour for the Vision Pro, which never
+    /// broadcasts on UDP 9943, and the UDP 9943 broadcast of Quest-style clients). The GUI only shows the `headset_seen` events.
     public class Discovery : IDisposable
     {
-        public class Found { public string Hostname, Ip; public ulong Protocol; public DateTime Seen; }
+        public class Found { public string Hostname, Ip, Protocol, ServerProtocol, Via; public bool Compatible; public DateTime Seen; }
         public event Action<Found> OnFound;
-        UdpClient udp;
-        Thread thread;
-        volatile bool stop;
+        public event Action<string> OnError;
+        HostProcess host;
 
-        public string Start()
+        public string Start(double seconds = 3600)
         {
-            try
+            host = new HostProcess();
+            host.OnEvent += (name, d) =>
             {
-                udp = new UdpClient();
-                udp.Client.SetSocketOption(SocketOptionLevel.Socket, SocketOptionName.ReuseAddress, true);
-                udp.Client.Bind(new IPEndPoint(IPAddress.Any, 9943));
-                udp.Client.ReceiveTimeout = 500;
-            }
-            catch (Exception e) { return "cannot listen on UDP 9943 (close VisionALVR.exe, SteamVR and ALVR first): " + e.Message; }
-            thread = new Thread(Loop) { IsBackground = true };
-            thread.Start();
-            return null;
+                if (name == "headset_seen" && d != null)
+                    OnFound?.Invoke(new Found
+                    {
+                        Hostname = Str(d, "hostname"), Ip = Str(d, "ip"), Protocol = Str(d, "protocol"), ServerProtocol = Str(d, "server_protocol"),
+                        Via = Str(d, "via"), Compatible = d.TryGetValue("compatible", out var c) && c is bool b && b, Seen = DateTime.Now,
+                    });
+                else if (name == "discovery_error" && d != null) OnError?.Invoke(Str(d, "message"));
+            };
+            return host.Start($"--install-dir \"{Paths.Dir}\" --discover {seconds.ToString(CultureInfo.InvariantCulture)}");
         }
 
-        void Loop()
-        {
-            var ep = new IPEndPoint(IPAddress.Any, 0);
-            while (!stop)
-            {
-                try
-                {
-                    var b = udp.Receive(ref ep);
-                    if (b.Length != 56 || Encoding.ASCII.GetString(b, 0, 4) != "ALVR") continue;
-                    int len = Array.IndexOf<byte>(b, 0, 24);
-                    var host = Encoding.UTF8.GetString(b, 24, (len < 0 ? 56 : len) - 24);
-                    OnFound?.Invoke(new Found { Hostname = host, Ip = ep.Address.ToString(), Protocol = BitConverter.ToUInt64(b, 16), Seen = DateTime.Now });
-                }
-                catch (SocketException) { }
-                catch (ObjectDisposedException) { return; }
-            }
-        }
+        static string Str(Dictionary<string, object> d, string k) => d.TryGetValue(k, out var v) && v != null ? Convert.ToString(v, CultureInfo.InvariantCulture) : "";
 
-        public void Dispose() { stop = true; try { udp?.Close(); } catch { } }
+        public void Dispose() { try { host?.Stop(1000); } catch { } }
     }
 
     /// alvr_host.exe as a child process: JSON events from its stdout, commands to its stdin (end of stdin = it quits).

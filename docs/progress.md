@@ -234,3 +234,11 @@ class requested (`gpu_sched_class` 5, needs an elevated host). Harness (`harness
 Audio checked: game audio is already captured on its own thread by ALVR's server_core (WASAPI loopback callback, sent as 10 ms
 batches on the shared stream socket); nothing to add in the host, stutter causes would be the client's 50 ms buffer policy and the
 shared socket, not a missing thread.
+
+2026-10-10 (evening, `redesign`): **headset discovery fixed in design** (compile-checked, not yet run): the Vision Pro client never
+sends ALVR's UDP 9943 broadcast; it advertises `_alvr._tcp` over mDNS/Bonjour (TXT device_id + protocol), which the GUIs never
+listened for. ALVR's two discovery protocols are now carved into the host (`tools/host/src/discovery.rs`, mdns-sd + UDP 9943):
+`alvr_host --discover <s>` for configure.exe (pairing list from `headset_seen` events, compatibility judged by the host against
+its own protocol id), and the daemon host browses mDNS alongside the stream so VisionALVR.exe shows "seen at <ip>" and keeps the
+paired address in step. The C# UDP listener is gone. `tools/wsl/check_gui.sh` compiles both GUIs from WSL (Roslyn via interop).
+Windows Firewall must allow alvr_host.exe on private networks (mDNS replies arrive on UDP 5353).

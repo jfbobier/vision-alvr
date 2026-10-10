@@ -114,8 +114,9 @@ namespace VisionALVR
             discovery?.Dispose();
             discovery = new Discovery();
             discovery.OnFound += f => BeginInvoke((Action)(() => AddFound(f)));
+            discovery.OnError += m => BeginInvoke((Action)(() => { discStatus.Text = "Discovery failed: " + m; discStatus.ForeColor = Color.Firebrick; }));
             var err = discovery.Start();
-            discStatus.Text = err ?? "Listening for headsets (UDP 9943)...";
+            discStatus.Text = err ?? "Looking for headsets (Bonjour/mDNS and UDP 9943)... If Windows asks, allow alvr_host.exe on private networks.";
             discStatus.ForeColor = err == null ? Color.DimGray : Color.Firebrick;
         }
 
@@ -124,10 +125,9 @@ namespace VisionALVR
             var key = f.Hostname + "|" + f.Ip;
             if (seen.ContainsKey(key)) { seen[key].Seen = f.Seen; return; }
             seen[key] = f;
-            var expected = check != null && check.TryGetValue("alvr_protocol_id", out var e) ? e as string : null;
-            var compatible = expected == null || expected == f.Protocol.ToString(CultureInfo.InvariantCulture);
-            var item = new ListViewItem(new[] { f.Hostname, f.Ip, compatible ? "compatible (ALVR " + (check != null && check.TryGetValue("alvr_protocol", out var pv) ? pv : "?") + ")" : "INCOMPATIBLE version" }) { Tag = f };
-            if (!compatible) item.ForeColor = Color.Firebrick;
+            var version = f.Via == "mdns" ? f.Protocol : (check != null && check.TryGetValue("alvr_protocol", out var pv) ? pv as string : "?");
+            var item = new ListViewItem(new[] { f.Hostname, f.Ip, f.Compatible ? $"compatible (ALVR {version})" : $"INCOMPATIBLE ({f.Protocol}, streamer {f.ServerProtocol})" }) { Tag = f };
+            if (!f.Compatible) item.ForeColor = Color.Firebrick;
             found.Items.Add(item);
             if (found.Items.Count == 1) item.Selected = true;
         }

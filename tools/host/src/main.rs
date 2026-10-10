@@ -12,6 +12,7 @@ use alvr_packets::{ButtonValue, Haptics};
 use alvr_server_core::{ServerCoreContext, ServerCoreEvent};
 use alvr_session::CodecType;
 mod bench_quality;
+mod discovery;
 mod logs;
 mod nvidia_profile;
 mod pipeline;
@@ -75,6 +76,8 @@ struct Args {
     debug: Option<bool>,
     gui: bool,
     system_check: bool,
+    /// run only the headset discovery for this many seconds (headset_seen events), then exit
+    discover: Option<f64>,
     gamma: Option<f32>,
     bench_network: Option<Vec<u32>>,
     bench_step_s: f64,
@@ -138,6 +141,7 @@ fn parse_args() -> Result<Args, String> {
         debug: None,
         gui: false,
         system_check: false,
+        discover: None,
         gamma: None,
         bench_network: None,
         bench_step_s: 8.0,
@@ -182,6 +186,7 @@ fn parse_args() -> Result<Args, String> {
             "--debug" => a.debug = Some(true),
             "--gui" => a.gui = true, // started by VisionALVR.exe: control commands on stdin, end of stdin = quit
             "--system-check" => a.system_check = true,
+            "--discover" => a.discover = Some(v()?.parse().map_err(|e| format!("{e}"))?),
             "--gamma" => a.gamma = Some(v()?.parse().map_err(|e| format!("{e}"))?),
             "--benchmark-network" => {
                 a.bench_network = Some(v()?.split(',').map(|x| x.trim().parse::<u32>().map_err(|e| format!("--benchmark-network: {e}"))).collect::<Result<_, _>>()?);
@@ -1165,6 +1170,30 @@ fn main() {
     if args.gui {
         vision::spawn_stdin_control();
     }
+    if let Some(secs) = args.discover {
+        // GUI pairing: ALVR's two discovery protocols (mDNS for the Vision Pro, UDP 9943 broadcasts), nothing else runs
+        let stop = Arc::new(AtomicBool::new(false));
+        let stop2 = Arc::clone(&stop);
+        if !args.gui {
+            vision::spawn_stdin_control(); // the GUI closes stdin (or sends "quit") to stop early
+        }
+        thread::spawn(move || {
+            let until = Instant::now() + Duration::from_secs_f64(secs);
+            while Instant::now() < until && !vision::QUIT.load(Ordering::SeqCst) {
+                thread::sleep(Duration::from_millis(100));
+            }
+            stop2.store(true, Ordering::Relaxed);
+        });
+        let r = discovery::run(stop, true, &|s| {
+            logs::general("INFO", &format!("headset seen ({}): {} at {} (protocol {}{})", s.via, s.hostname, s.ip, s.protocol, if s.compatible { "" } else { ", INCOMPATIBLE" }));
+            event(origin, "headset_seen", discovery::event_json(&s));
+        });
+        if let Err(e) = r {
+            event(origin, "discovery_error", json!({ "message": e.to_string() }));
+            std::process::exit(6);
+        }
+        std::process::exit(0);
+    }
     vision::spawn_gpu_sampler(|| {
         let mut b = vec![0 as std::ffi::c_char; 256];
         (unsafe { nvh::nvh_gpu_sample(b.as_mut_ptr(), b.len() as i32) } > 0)
@@ -1371,6 +1400,15 @@ fn main() {
     let mut frame_rows: Vec<String> = vec![]; // header added when written
     ctx.start_connection();
     event(origin, "listening", json!({ "config_dir": args.config_dir }));
+    let discovery_stop = Arc::new(AtomicBool::new(false));
+    {
+        let stop = Arc::clone(&discovery_stop);
+        thread::spawn(move || {
+            if let Err(e) = discovery::run(stop, false, &|s| event(origin, "headset_seen", discovery::event_json(&s))) {
+                logs::general("WARN", &format!("headset discovery (mDNS) not running: {e}"));
+            }
+        });
+    }
 
     // event thread
     {
@@ -2034,6 +2072,7 @@ fn main() {
         v.len()
     };
     vsync_stop.store(true, Ordering::Relaxed);
+    discovery_stop.store(true, Ordering::Relaxed);
     let vsync_intervals = vsync_thread.map(|t| t.join().unwrap_or_default()).unwrap_or_default();
     let mut pipeline_report = json!(null);
     if let Some(p) = pipeline.take() {

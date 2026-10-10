@@ -82,8 +82,9 @@ def check():
 
 def build(what):
     files = {
-        "host": [(f"tools/host/src/{m}", "tools/host/src/") for m in ("main.rs", "pipeline.rs", "vision.rs", "logs.rs")]
+        "host": [(f"tools/host/src/{m}", "tools/host/src/") for m in ("main.rs", "pipeline.rs", "discovery.rs", "vision.rs", "logs.rs")]
                 + [("nvenc/hostlib/nvh.cpp", "nvenc/hostlib/"), ("nvenc/hostlib/nvh.h", "nvenc/hostlib/"), ("tools/host/build.rs", "tools/host/"),
+                   ("tools/host/Cargo.toml", "tools/host/"),
                    ("ovrshim/ipc.h", "ovrshim/"), ("ovrshim/ipc_win.h", "ovrshim/")],
         "shim": [(f, "ovrshim/") for f in sorted(glob.glob(str(ROOT / "ovrshim" / "*"))) if Path(f).is_file()],
     }
