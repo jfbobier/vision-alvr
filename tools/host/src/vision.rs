@@ -46,8 +46,20 @@ pub struct Settings {
     pub gamma: Option<f32>,
     /// headset height above the floor handed to games (m); 0 = the headset's own floor estimate
     pub height_m: Option<f32>,
+    /// hand pose convention fix for the Oculus-emulation path: rotation (deg, XYZ Euler, left hand; the right mirrors y/z) and
+    /// position offset (m) applied in the hand's local frame by the shim; default [0, 180, 0] (palm/back and aim were inverted)
+    pub hand_rotation_deg: Option<[f32; 3]>,
+    pub hand_position_m: Option<[f32; 3]>,
     /// brightness, contrast, saturation, sharpening (0 = neutral)
     pub color: [f32; 4],
+}
+
+fn arr3(v: &Value) -> Option<[f32; 3]> {
+    let a = v.as_array()?;
+    if a.len() != 3 {
+        return None;
+    }
+    Some([a[0].as_f64()? as f32, a[1].as_f64()? as f32, a[2].as_f64()? as f32])
 }
 
 pub fn load_settings(path: &Path) -> Settings {
@@ -68,6 +80,8 @@ pub fn load_settings(path: &Path) -> Settings {
         debug: v["debug"].as_bool(),
         gamma: v["display"]["gamma"].as_f64().map(|g| g as f32),
         height_m: v["headset"]["height_m"].as_f64().map(|g| g as f32),
+        hand_rotation_deg: arr3(&v["controllers"]["hand_rotation_deg"]),
+        hand_position_m: arr3(&v["controllers"]["hand_position_m"]),
         color: ["brightness", "contrast", "saturation", "sharpening"].map(|k| v["display"][k].as_f64().unwrap_or(0.0) as f32),
     }
 }

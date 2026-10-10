@@ -14,7 +14,7 @@
 namespace visionalvr_ipc {
 
 constexpr uint32_t kMagic = 0x56414C31; // 'VAL1'
-constexpr uint32_t kVersion = 12;
+constexpr uint32_t kVersion = 13;
 constexpr int kSlots = 6;   // SBS ring: the host holds up to 2 (newest + encoding), 2 may be in flight on the GPU
 
 struct Pose {
@@ -75,6 +75,11 @@ struct HostToShim {
     uint32_t slotBusyMask;         // bit i: the host holds ring slot i (newest published frame, or being read by its encoder): the shim never renders into it
     float boundaryOffsetMs;        // the host's compositor boundary = display tick + this offset (ms)
     float runningStartMs;          // > 0: WaitToBeginFrame releases the app appFrameMs + this margin before the next boundary (running start); 0: at the tick
+    // Hand pose convention fix: ALVR's controller poses follow its SteamVR driver's (OpenVR Touch) convention; LibOVR's Touch poses
+    // differ by a fixed local transform (VDXR's grip/aim offsets were calibrated against the Oculus runtime). Applied per hand as
+    // pose' = (q * offsetQ, p + q * offsetQ * offsetP); the right hand mirrors the rotation (x, -y, -z) like ALVR's own offsets.
+    float handOffsetQuat[2][4];    // x y z w, per side (left, right); all zero = identity
+    float handOffsetPos[2][3];
 };
 
 struct Haptic {

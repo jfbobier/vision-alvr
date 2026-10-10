@@ -577,6 +577,12 @@ void nvh_ipc_set_pacing(void* i, float boundary_offset_ms, float running_start_m
     h.boundaryOffsetMs = boundary_offset_ms; MemoryBarrier(); h.runningStartMs = running_start_ms;
 }
 
+void nvh_ipc_set_hand_offset(void* i, int side, const float* q, const float* p) {
+    if (side < 0 || side > 1) return;
+    auto& h = ((Ipc*)i)->state->host;
+    memcpy(h.handOffsetPos[side], p, 12); MemoryBarrier(); memcpy(h.handOffsetQuat[side], q, 16);
+}
+
 void nvh_ipc_shim_pacing(void* i, uint32_t* slot_busy_waits, float* app_frame_ms, uint64_t* releases, uint64_t* releases_late) {
     const auto& s = ((Ipc*)i)->state->shim;
     *slot_busy_waits = s.slotBusyWaits; *app_frame_ms = s.appFrameMs; *releases = s.releases; *releases_late = s.releasesLate;

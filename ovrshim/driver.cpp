@@ -1802,6 +1802,17 @@ namespace {
                 out = {};
                 out.ThePose.Orientation = {p.orientation[0], p.orientation[1], p.orientation[2], p.orientation[3]};
                 out.ThePose.Position = {p.position[0], p.position[1], p.position[2]};
+                {
+                    // ALVR (OpenVR Touch) -> LibOVR Touch pose convention, see ipc.h handOffsetQuat
+                    const float* oq = h.handOffsetQuat[side];
+                    if (oq[0] != 0.f || oq[1] != 0.f || oq[2] != 0.f || oq[3] != 0.f) {
+                        const OVR::Quatf offQ(oq[0], oq[1], oq[2], oq[3]);
+                        const OVR::Vector3f offP(h.handOffsetPos[side][0], h.handOffsetPos[side][1], h.handOffsetPos[side][2]);
+                        const OVR::Quatf q = OVR::Quatf(out.ThePose.Orientation) * offQ;
+                        out.ThePose.Orientation = q.Normalized();
+                        out.ThePose.Position = OVR::Vector3f(out.ThePose.Position) + q.Rotate(offP);
+                    }
+                }
                 out.LinearVelocity = {lv[0], lv[1], lv[2]};
                 out.AngularVelocity = {av[0], av[1], av[2]};
                 out.TimeInSeconds = t;

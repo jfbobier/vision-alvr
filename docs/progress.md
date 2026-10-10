@@ -261,3 +261,12 @@ floor, m" (default 1.30 = a seated adult, 0 = headset floor as is; `headset.heig
 `height <m>`). The host adds a constant offset to the head's and hands' y so the head sits at that height when anchored (half a
 second after connect, and whenever the knob moves: re-anchored to the current pose); the headset's own vertical movement stays on
 top, games can still override. Logged as `height_calibrated` and in the general log. Compile-checked, not yet run.
+
+2026-10-10 (night, main): **hand pose convention fix** (user playtest: Subside, The Midnight Walk show the palm where the back of the
+hand should be and the aim inverted; SteamVR + ALVR is fine). Cause: the host handed ALVR's controller pose, which follows ALVR's
+SteamVR-driver (OpenVR Touch) convention, straight to LibOVR; VDXR's grip/aim offsets are calibrated against the Oculus runtime's
+own Touch pose convention. The shim now applies a configurable local offset per hand (IPC v13 `handOffsetQuat/Pos`): default a
+180 deg rotation about the hand's Y (the observed symptom: pointing and palm normal both flipped, left/right positions intact),
+right hand mirrored like ALVR's offsets. Settings `controllers.hand_rotation_deg` [x,y,z] / `controllers.hand_position_m`,
+CLI `--hand-rotation x,y,z` / `--hand-position x,y,z`. The exact value is to be confirmed in the headset (the harness only checks
+hand positions, never orientation): if 180 about Y is not it, the candidates are 180 about Z (roll) or a pitch offset.

@@ -83,6 +83,11 @@ struct Args {
     /// on the floor by default (Moss, Titan Isles) assume a standing user; the Vision Pro's floor estimate is unreliable, so
     /// the launcher sets a plausible seated height (1.3 m) and the headset's own vertical movement is kept on top of it.
     height_m: f32,
+    /// hand pose convention fix (shim, Oculus-emulation path): local rotation in degrees (XYZ Euler, left hand; right hand mirrors
+    /// y and z like ALVR's controller offsets) and local position offset in metres. Default 180 deg about Y: with ALVR's
+    /// OpenVR-convention controller pose handed straight to LibOVR, palm/back and the aim came out inverted (Subside, Midnight Walk).
+    hand_rotation_deg: [f32; 3],
+    hand_position_m: [f32; 3],
     bench_network: Option<Vec<u32>>,
     bench_step_s: f64,
     noise_block: i64,
@@ -148,6 +153,8 @@ fn parse_args() -> Result<Args, String> {
         discover: None,
         gamma: None,
         height_m: 1.3,
+        hand_rotation_deg: [0.0, 180.0, 0.0],
+        hand_position_m: [0.0, 0.0, 0.0],
         bench_network: None,
         bench_step_s: 8.0,
         noise_block: 16,
@@ -194,6 +201,13 @@ fn parse_args() -> Result<Args, String> {
             "--discover" => a.discover = Some(v()?.parse().map_err(|e| format!("{e}"))?),
             "--gamma" => a.gamma = Some(v()?.parse().map_err(|e| format!("{e}"))?),
             "--height-m" => a.height_m = v()?.parse().map_err(|e| format!("{e}"))?,
+            "--hand-rotation" | "--hand-position" => {
+                let vals: Vec<f32> = v()?.split(',').map(|x| x.trim().parse::<f32>().map_err(|e| format!("{k}: {e}"))).collect::<Result<_, _>>()?;
+                if vals.len() != 3 {
+                    return Err(format!("{k}: expected x,y,z"));
+                }
+                if k == "--hand-rotation" { a.hand_rotation_deg = [vals[0], vals[1], vals[2]] } else { a.hand_position_m = [vals[0], vals[1], vals[2]] }
+            }
             "--benchmark-network" => {
                 a.bench_network = Some(v()?.split(',').map(|x| x.trim().parse::<u32>().map_err(|e| format!("--benchmark-network: {e}"))).collect::<Result<_, _>>()?);
                 a.live = true;
@@ -361,6 +375,12 @@ fn apply_settings(a: &mut Args, st: &vision::Settings) {
     }
     if let Some(h) = st.height_m {
         a.height_m = h;
+    }
+    if let Some(r) = st.hand_rotation_deg {
+        a.hand_rotation_deg = r;
+    }
+    if let Some(p) = st.hand_position_m {
+        a.hand_position_m = p;
     }
     if a.encode_profile == nvidia_profile::EncodeProfile::FullSplit {
         // whole frame, straight to the encoder engines: no QP map, 3 strips (explicit --qp-map / --split-encode still win)
@@ -694,6 +714,7 @@ mod nvh {
         pub fn nvh_ipc_shim_stats(ipc: *mut c_void, submit_mode: *mut u32, ts_matched: *mut u32, ts_fallback: *mut u32);
         pub fn nvh_ipc_slot_busy(ipc: *mut c_void, slot: u32, busy: i32);
         pub fn nvh_ipc_set_pacing(ipc: *mut c_void, boundary_offset_ms: f32, running_start_ms: f32);
+        pub fn nvh_ipc_set_hand_offset(ipc: *mut c_void, side: i32, quat_xyzw: *const f32, pos: *const f32);
         pub fn nvh_ipc_shim_pacing(ipc: *mut c_void, slot_busy_waits: *mut u32, app_frame_ms: *mut f32, releases: *mut u64, releases_late: *mut u64);
         pub fn nvh_set_gpu_scheduling(cls: i32) -> i32;
     }
@@ -1395,6 +1416,17 @@ fn main() {
             ipc_addr, Arc::clone(&ctx), Arc::clone(&shared), pipeline::Encoder { handle: h, live: l });
         logs::set_clock(Instant::now(), unsafe { nvh::nvh_qpc_seconds() });
         unsafe { nvh::nvh_ipc_set_pacing(ipc, args.boundary_offset_ms as f32, args.running_start_ms as f32) };
+        {
+            // hand pose convention fix (see Args::hand_rotation_deg); the right hand mirrors y and z like ALVR's own offsets
+            use alvr_common::glam::{EulerRot, Quat};
+            let r = args.hand_rotation_deg.map(f32::to_radians);
+            for (side, (ry, rz, px)) in [(0, (r[1], r[2], args.hand_position_m[0])), (1, (-r[1], -r[2], -args.hand_position_m[0]))] {
+                let q = Quat::from_euler(EulerRot::XYZ, r[0], ry, rz).to_array();
+                let p = [px, args.hand_position_m[1], args.hand_position_m[2]];
+                unsafe { nvh::nvh_ipc_set_hand_offset(ipc, side, q.as_ptr(), p.as_ptr()) };
+            }
+            event(origin, "hand_offset", json!({ "rotation_deg": args.hand_rotation_deg, "position_m": args.hand_position_m }));
+        }
         p.set_gpu_scheduling(args.gpu_sched_class);
         p.start();
         event(origin, "pacing_config", json!({ "send_pacing": args.send_pacing.name(), "running_start_ms": args.running_start_ms,
