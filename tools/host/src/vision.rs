@@ -33,6 +33,8 @@ pub struct Settings {
     pub encode_profile: Option<String>,
     pub qp_map: Option<bool>,
     pub split_encode: Option<String>,
+    /// "asap" (default) or "vsync": hold each encoded frame until the next display-clock tick before sending it
+    pub send_pacing: Option<String>,
     pub gpu_priority: Option<i64>,
     pub debug: Option<bool>,
     pub gamma: Option<f32>,
@@ -41,13 +43,16 @@ pub struct Settings {
 }
 
 pub fn load_settings(path: &Path) -> Settings {
-    let v: Value = fs::read_to_string(path).ok().and_then(|t| serde_json::from_str(&t).ok()).unwrap_or_default();
+    // A UTF-8 BOM (Windows PowerShell's Set-Content / older Notepad) made serde_json reject the whole file and silently
+    // dropped every setting (seen 2026-10-10): strip it.
+    let v: Value = fs::read_to_string(path).ok().and_then(|t| serde_json::from_str(t.trim_start_matches('\u{feff}')).ok()).unwrap_or_default();
     let video = &v["video"];
     Settings {
         idle_rgb: video["idle_rgb"].as_str().and_then(|s| u32::from_str_radix(s.trim_start_matches('#'), 16).ok()),
         encode_profile: video["encode_profile"].as_str().map(str::to_string),
         qp_map: video["qp_map"].as_bool(),
         split_encode: video["split_encode"].as_str().map(str::to_string),
+        send_pacing: video["send_pacing"].as_str().map(str::to_string),
         gpu_priority: video["gpu_priority"].as_i64(),
         debug: v["debug"].as_bool(),
         gamma: v["display"]["gamma"].as_f64().map(|g| g as f32),
