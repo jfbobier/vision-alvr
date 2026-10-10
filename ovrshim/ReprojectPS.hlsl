@@ -34,6 +34,10 @@ Texture2D<float4> sourceColor : register(t0);
 
 float4 main(in float4 position : SV_Position, in float3 reprojectedCoord : TEXCOORD0) : SV_Target
 {
+    if (reprojectedCoord.z <= 0.0)
+    {
+        discard; // behind the source eye (large rotation): nothing to sample
+    }
     float2 reprojectedNdc = reprojectedCoord.xy / reprojectedCoord.z;
     if (any(abs(reprojectedNdc) > 1.0))
     {

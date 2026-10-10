@@ -10,7 +10,7 @@
       }
     },
     "VDXR": {
-      "full_hash": "1a83fec8b5c565b14b06ffa8e1eb7e4768057573",
+      "full_hash": "6fccb7ad09f654ea0b03d78b5b093f5a9eb1acff",
       "where": "builder src/VDXR",
       "submodules": {
         "external/FidelityFX-CAS": "9fabcc9a2c45f958aff55ddfda337e74ef894b7f",
@@ -24,7 +24,11 @@
         "external/cJSON": "c859b25da02955fef659d658b8f324b5cde87be3",
         "external/fmt": "130cf54cbc77abf0c8200a1206638cb70c9e26f1",
         "external/openvr": "f51d87ecf8f7903e859b0aa4d617ff1e5f33db5a"
-      }
+      },
+      "upstream_hash": "1a83fec8b5c565b14b06ffa8e1eb7e4768057573",
+      "fork": "https://github.com/jfbobier/VirtualDesktop-OpenXR.git",
+      "branch": "visionalvr",
+      "note": "VisionALVR fork of mbucchia/VirtualDesktop-OpenXR (branch visionalvr): the former stage15 text patches as commits, plus the per-frame trace hooks (visionalvr_trace.h)"
     }
   },
   "recon_clones": {

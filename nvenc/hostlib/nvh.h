@@ -71,6 +71,9 @@ void nvh_ipc_close(void* ipc);
 void nvh_ipc_set_user(void* ipc, float user_gamma, int debug_on, const wchar_t* debug_dir);
 // The user's colour correction (0 = neutral each), applied by the shim on the encoded output.
 void nvh_ipc_set_color(void* ipc, float brightness, float contrast, float saturation, float sharpening);
+// Frame stamping in the shim: stamp_mode 0 = the sample the app rendered with, 1 = newest sample + rotation to it (fresh_wait_ms:
+// how long to wait for a new sample when none arrived since the previous frame).
+void nvh_ipc_set_pacing(void* ipc, int stamp_mode, float fresh_wait_ms);
 // The app's executable name as published by the shim (UTF-8). Returns bytes written incl. the terminator.
 int nvh_ipc_app_exe(void* ipc, char* buf, int len);
 // NVML: GPU identity as JSON ({"nvml":1,"name","driver","arch","arch_name","vram_mb"}; arch Ada = 8, Blackwell = 10), and one CSV

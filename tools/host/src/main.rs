@@ -18,6 +18,7 @@ mod vision;
 
 use serde_json::json;
 use std::{
+    collections::VecDeque,
     fs,
     path::PathBuf,
     sync::{
@@ -55,6 +56,15 @@ struct Args {
     /// its vsync grid; see the `send_on_vsync` handling in the main loop)
     send_on_vsync: bool,
     send_pacing_explicit: bool,
+    /// 0: frames stamped with the sample the app rendered with; 1: newest sample + projection layers rotated to it; 2: 1 + the pose
+    /// handed to the app is extrapolated to the expected stamp time
+    stamp_mode: i32,
+    stamp_explicit: bool,
+    fresh_wait_ms: f64,
+    /// display clock phase-locked to the headset's tracking packets (its real display rate) instead of ALVR's free-running grid
+    pacing_tracking: bool,
+    pacing_explicit: bool,
+    pacing_guard_ms: f64,
     qp_map: Option<bool>,
     dump_qpmap: Option<PathBuf>,
     idle_rgb: Option<u32>,
@@ -114,6 +124,12 @@ fn parse_args() -> Result<Args, String> {
         split_encode: 3,
         send_on_vsync: false,
         send_pacing_explicit: false,
+        stamp_mode: 2,
+        stamp_explicit: false,
+        fresh_wait_ms: 3.0,
+        pacing_tracking: true,
+        pacing_explicit: false,
+        pacing_guard_ms: 2.0,
         qp_map: None,
         dump_qpmap: None,
         idle_rgb: None,
@@ -204,6 +220,16 @@ fn parse_args() -> Result<Args, String> {
                 a.send_pacing_explicit = true;
                 a.send_on_vsync = parse_send_pacing(&v()?)?;
             }
+            "--stamp" => {
+                a.stamp_explicit = true;
+                a.stamp_mode = parse_stamp(&v()?)?;
+            }
+            "--fresh-wait-ms" => a.fresh_wait_ms = v()?.parse().map_err(|e| format!("{e}"))?,
+            "--pacing" => {
+                a.pacing_explicit = true;
+                a.pacing_tracking = parse_pacing(&v()?)?;
+            }
+            "--pacing-guard-ms" => a.pacing_guard_ms = v()?.parse().map_err(|e| format!("{e}"))?,
             "--qp-map" => {
                 a.qp_map = Some(match v()?.as_str() {
                     "on" | "1" => true,
@@ -268,6 +294,31 @@ fn parse_split(v: &str) -> Result<i64, String> {
     })
 }
 
+fn parse_stamp(s: &str) -> Result<i32, String> {
+    match s {
+        "predict" => Ok(2),
+        "newest" | "warp" => Ok(1),
+        "match" | "rendered" => Ok(0),
+        o => Err(format!("--stamp predict|newest|match, got {o}")),
+    }
+}
+
+fn stamp_name(mode: i32) -> &'static str {
+    match mode {
+        2 => "predict",
+        1 => "newest",
+        _ => "match",
+    }
+}
+
+fn parse_pacing(s: &str) -> Result<bool, String> {
+    match s {
+        "tracking" | "headset" => Ok(true),
+        "grid" | "alvr" => Ok(false),
+        o => Err(format!("--pacing tracking|grid, got {o}")),
+    }
+}
+
 fn parse_send_pacing(s: &str) -> Result<bool, String> {
     match s {
         "vsync" | "tick" => Ok(true),
@@ -282,6 +333,22 @@ fn apply_settings(a: &mut Args, st: &vision::Settings) {
         if let Some(p) = st.send_pacing.as_deref().and_then(|p| parse_send_pacing(p).ok()) {
             a.send_on_vsync = p;
         }
+    }
+    if !a.stamp_explicit {
+        if let Some(p) = st.stamp.as_deref().and_then(|p| parse_stamp(p).ok()) {
+            a.stamp_mode = p;
+        }
+    }
+    if let Some(w) = st.fresh_wait_ms {
+        a.fresh_wait_ms = w.clamp(0.0, 10.0);
+    }
+    if !a.pacing_explicit {
+        if let Some(p) = st.pacing.as_deref().and_then(|p| parse_pacing(p).ok()) {
+            a.pacing_tracking = p;
+        }
+    }
+    if let Some(g) = st.pacing_guard_ms {
+        a.pacing_guard_ms = g.clamp(0.0, 6.0);
     }
     if a.idle_rgb.is_none() {
         a.idle_rgb = st.idle_rgb;
@@ -369,6 +436,7 @@ struct StatsWindow {
 static VSYNC_TICKS: AtomicU64 = AtomicU64::new(0);
 /// Pacing diagnostics, reported per `encoder_stats` window. Ticks are nanoseconds since the host's `origin` instant.
 static LAST_TICK_NS: AtomicU64 = AtomicU64::new(0);
+static LAST_TICK_QPC: AtomicU64 = AtomicU64::new(0); // f64 bits, QPC seconds (shared clock with the shim's CSV)
 static NEXT_TICK_NS: AtomicU64 = AtomicU64::new(0);
 /// app frames sent with the same client timestamp as the previous frame (the headset treats them as already shown)
 static SAME_TS_FRAMES: AtomicU64 = AtomicU64::new(0);
@@ -379,6 +447,95 @@ static HOLD_MS: std::sync::Mutex<Vec<f64>> = std::sync::Mutex::new(Vec::new());
 /// spacing of the headset's tracking packets arriving at the host
 static TRACKING_GAP_MS: std::sync::Mutex<Vec<f64>> = std::sync::Mutex::new(Vec::new());
 static LAST_TRACKING_NS: AtomicU64 = AtomicU64::new(0);
+static LAST_HEAD_POSE: std::sync::Mutex<Option<(alvr_common::glam::Quat, alvr_common::glam::Vec3)>> = std::sync::Mutex::new(None);
+static HEAD_STEP_MDEG: std::sync::Mutex<Vec<f64>> = std::sync::Mutex::new(Vec::new());
+static HEAD_STEP_MM: std::sync::Mutex<Vec<f64>> = std::sync::Mutex::new(Vec::new());
+/// display-clock tick minus the latest tracking arrival (tracking pacing: should sit near the guard)
+static TICK_AFTER_TRACKING_MS: std::sync::Mutex<Vec<f64>> = std::sync::Mutex::new(Vec::new());
+
+/// Phase-locked loop on the headset's tracking packets: the visionOS client sends exactly one per display frame, so their
+/// arrival grid is the headset's display clock (90, 96 or 100 Hz) plus network jitter. The display-clock tick is placed a guard
+/// after the estimated arrival, so the app reads a fresh sample for every frame and runs at the headset's real rate.
+#[derive(Default)]
+struct TrackingPll {
+    period_ns: f64,
+    /// a point of the estimated arrival grid (kept within one period of the latest arrival)
+    anchor: Option<Instant>,
+    gaps: VecDeque<f64>,
+    last: Option<Instant>,
+    updates: u64,
+}
+static PLL: std::sync::Mutex<TrackingPll> = std::sync::Mutex::new(TrackingPll { period_ns: 0.0, anchor: None, gaps: VecDeque::new(), last: None, updates: 0 });
+
+/// A tracking packet arrived now. Returns this arrival's residual vs the estimated grid (ms; negative = early).
+fn pll_arrival(now: Instant) -> f64 {
+    let Ok(mut pll) = PLL.lock() else { return 0.0 };
+    let mut residual_ms = 0.0;
+    if let Some(prev) = pll.last {
+        let gap = now.duration_since(prev).as_secs_f64() * 1e9;
+        if gap < 60e6 {
+            pll.gaps.push_back(gap);
+            if pll.gaps.len() > 64 {
+                pll.gaps.pop_front();
+            }
+        } else {
+            // a stall: start over (the anchor would otherwise pull the grid for seconds)
+            pll.anchor = None;
+            pll.gaps.clear();
+        }
+    }
+    pll.last = Some(now);
+    if pll.gaps.len() >= 16 {
+        let mut v: Vec<f64> = pll.gaps.iter().copied().collect();
+        v.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        // the median gap is the display period (a late packet makes one long gap and one short one)
+        pll.period_ns = v[v.len() / 2].clamp(8e6, 14e6);
+    } else if pll.period_ns == 0.0 {
+        pll.period_ns = 1e9 / 90.0; // until 16 gaps are in: the headset rates in play are 90-100 Hz
+    }
+    let p = pll.period_ns;
+    match pll.anchor {
+        None => pll.anchor = Some(now),
+        Some(a) => {
+            let dt = if now >= a { now.duration_since(a).as_nanos() as f64 } else { -(a.duration_since(now).as_nanos() as f64) };
+            let k = (dt / p).round();
+            let r = dt - k * p; // this arrival vs the grid: negative = earlier than estimated
+            // Network delay only ever makes packets late, so the grid hugs the early edge of the arrivals: pull quickly when a
+            // packet comes early, drift slowly when it comes late.
+            let adj = if r < 0.0 { 0.2 * r } else { 0.02 * r };
+            let shift = k * p + adj;
+            pll.anchor = Some(if shift >= 0.0 { a + Duration::from_nanos(shift as u64) } else { a - Duration::from_nanos((-shift) as u64) });
+            pll.updates += 1;
+            residual_ms = r / 1e6;
+        }
+    }
+    residual_ms
+}
+
+/// Next display-clock tick from the tracking grid: (tick instant, period). None while unlocked or when tracking stopped.
+fn pll_next_tick(now: Instant, guard_ns: f64) -> Option<(Instant, Duration)> {
+    let pll = PLL.lock().ok()?;
+    let a = pll.anchor?;
+    if pll.updates < 8 || pll.gaps.len() < 16 || now.duration_since(pll.last?) > Duration::from_millis(250) {
+        return None;
+    }
+    let p = pll.period_ns;
+    let dt = if now >= a { now.duration_since(a).as_nanos() as f64 } else { -(a.duration_since(now).as_nanos() as f64) };
+    // smallest grid point whose tick (grid + guard) is at least a quarter period ahead (never two ticks back to back)
+    let mut k = ((dt + 0.25 * p - guard_ns) / p).floor() + 1.0;
+    if k < 0.0 {
+        k = 0.0;
+    }
+    let t = k * p + guard_ns;
+    let tick = if t >= 0.0 { a + Duration::from_nanos(t as u64) } else { a - Duration::from_nanos((-t) as u64) };
+    Some((tick, Duration::from_nanos(p as u64)))
+}
+
+fn pll_status() -> (bool, f64, f64) {
+    let Ok(pll) = PLL.lock() else { return (false, 0.0, 0.0) };
+    let since_last = pll.last.map(|l| l.elapsed().as_secs_f64() * 1000.0).unwrap_or(1e9);
+    (pll.updates >= 8 && pll.gaps.len() >= 16 && since_last < 250.0, pll.period_ns / 1e6, since_last)
+}
 
 fn push_bounded(m: &std::sync::Mutex<Vec<f64>>, v: f64) {
     if let Ok(mut g) = m.lock() {
@@ -484,6 +641,27 @@ impl StatsWindow {
                 let late = v.iter().filter(|x| **x <= 0.0).count();
                 e["send_hold_ms"] = pct_json(&mut v, &[]);
                 e["send_hold_ms"]["late_frames"] = json!(late);
+            }
+        }
+        for (name, m) in [("head_step_mdeg", &HEAD_STEP_MDEG), ("head_step_mm", &HEAD_STEP_MM)] {
+            if let Ok(mut g) = m.lock() {
+                if !g.is_empty() {
+                    let mut v = std::mem::take(&mut *g);
+                    // p05 ~ the still-head jitter floor, p50 the typical step
+                    v.sort_by(|a, b| a.partial_cmp(b).unwrap());
+                    let q = |p: f64| v.get(((v.len() as f64) * p) as usize).copied().unwrap_or(0.0);
+                    e[name] = json!({ "p05": q(0.05), "p25": q(0.25), "p50": q(0.5), "p95": q(0.95), "n": v.len() });
+                }
+            }
+        }
+        {
+            let (locked, period_ms, since_last_ms) = pll_status();
+            e["tracking_pll"] = json!({ "locked": locked, "period_ms": period_ms, "since_last_ms": since_last_ms });
+            if let Ok(mut g) = TICK_AFTER_TRACKING_MS.lock() {
+                if !g.is_empty() {
+                    let mut v = std::mem::take(&mut *g);
+                    e["tick_after_tracking_ms"] = pct_json(&mut v, &[]);
+                }
             }
         }
         event(origin, "encoder_stats", e);
@@ -633,6 +811,7 @@ mod nvh {
         pub fn nvh_ipc_set_user(ipc: *mut c_void, user_gamma: f32, debug_on: i32, debug_dir: *const u16);
         pub fn nvh_ipc_app_exe(ipc: *mut c_void, buf: *mut c_char, len: i32) -> i32;
         pub fn nvh_ipc_set_color(ipc: *mut c_void, brightness: f32, contrast: f32, saturation: f32, sharpening: f32);
+        pub fn nvh_ipc_set_pacing(ipc: *mut c_void, stamp_mode: i32, fresh_wait_ms: f32);
         pub fn nvh_gpu_info(buf: *mut c_char, len: i32) -> i32;
         pub fn nvh_gpu_sample(buf: *mut c_char, len: i32) -> i32;
         pub fn nvh_ipc_shim_stats(ipc: *mut c_void, submit_mode: *mut u32, ts_matched: *mut u32, ts_fallback: *mut u32);
@@ -1092,6 +1271,7 @@ fn main() {
         }
     };
     let origin = Instant::now();
+    logs::set_clock(origin, unsafe { nvh::nvh_qpc_seconds() });
     let gpu_info: serde_json::Value = {
         let mut b = vec![0 as std::ffi::c_char; 1024];
         unsafe { nvh::nvh_gpu_info(b.as_mut_ptr(), b.len() as i32) };
@@ -1317,6 +1497,8 @@ fn main() {
             "max_ms": v.iter().cloned().fold(0.0, f64::max), "width": enc_size.0, "height": enc_size.1, "profile": format!("{:?}", args.encode_profile),
             "split_encode_mode": args.split_encode, "nvenc_engines": unsafe { nvh::nvh_encoder_engines(enc_handle) },
             "send_pacing": if args.send_on_vsync { "vsync" } else { "asap" },
+            "stamp": stamp_name(args.stamp_mode), "fresh_wait_ms": args.fresh_wait_ms,
+            "pacing": if args.pacing_tracking { "tracking" } else { "grid" }, "pacing_guard_ms": args.pacing_guard_ms,
             "slices_per_frame": live.as_ref().map(|l| l.slices as f64 / l.slice_samples.max(1) as f64),
             "fps": args.fps, "budget_ms": budget, "fits": p95 < budget * 0.9, "noise": args.noise, "noise_block": args.noise_block, "noise_amp": args.noise_amp,
             "target_mbps": mbps, "produced_mbps_at_fps": live.as_ref().map(|l| l.bytes_total as f64 * 8.0 / n.max(1) as f64 * args.fps / 1e6) });
@@ -1368,6 +1550,24 @@ fn main() {
                     ServerCoreEvent::Tracking { sample_timestamp } => {
                         let n = shared.tracking_events.fetch_add(1, Ordering::Relaxed);
                         let now_ns = origin.elapsed().as_nanos() as u64;
+                        let pll_residual_ms = pll_arrival(Instant::now());
+                        if let Some(m) = ctx.get_device_motion(*HEAD_ID, sample_timestamp) {
+                            // sample-to-sample head step (orientation in millidegrees, position in mm): the jitter of the pose
+                            // stream the frames are placed by (grows with the headset's prediction horizon)
+                            if let Ok(mut prev) = LAST_HEAD_POSE.lock() {
+                                if let Some((pq, pp)) = *prev {
+                                    let d = (m.pose.orientation * pq.inverse()).normalize();
+                                    let ang = 2.0 * d.w.clamp(-1.0, 1.0).acos() as f64;
+                                    let ang = if ang > std::f64::consts::PI { 2.0 * std::f64::consts::PI - ang } else { ang };
+                                    push_bounded(&HEAD_STEP_MDEG, ang.to_degrees() * 1000.0);
+                                    push_bounded(&HEAD_STEP_MM, (m.pose.position - pp).length() as f64 * 1000.0);
+                                    logs::csv("tracking.csv", "t_arrival,ts_ns,step_mdeg,step_mm,pll_residual_ms",
+                                        &format!("{:.6},{},{:.1},{:.3},{:.3}", logs::qpc_now(), sample_timestamp.as_nanos(), ang.to_degrees() * 1000.0,
+                                            (m.pose.position - pp).length() as f64 * 1000.0, pll_residual_ms));
+                                }
+                                *prev = Some((m.pose.orientation, m.pose.position));
+                            }
+                        }
                         let prev_ns = LAST_TRACKING_NS.swap(now_ns, Ordering::Relaxed);
                         if prev_ns != 0 {
                             push_bounded(&TRACKING_GAP_MS, now_ns.saturating_sub(prev_ns) as f64 / 1e6);
@@ -1486,6 +1686,7 @@ fn main() {
     let vsync_thread = if args.shim {
         let (ctx, ticks, period_ns, stop) = (Arc::clone(&ctx), Arc::clone(&vsync_ticks), Arc::clone(&vsync_period_ns), Arc::clone(&vsync_stop));
         let daemon = args.daemon;
+        let (pacing_tracking, guard_ns) = (args.pacing_tracking, args.pacing_guard_ms * 1e6);
         Some(thread::spawn(move || {
             #[cfg(windows)]
             unsafe {
@@ -1514,12 +1715,28 @@ fn main() {
                 // therefore lands a few microseconds BEFORE the grid point, and ALVR then answers "a few microseconds". Clamping
                 // that to 0.5 ms produced a second tick 0.5 ms later on ~15-20% of ticks (~107 Hz instead of 90: apps ran at
                 // 97-111 fps in the first headset test). A remainder under half a period means "this grid point": aim at the next.
-                let mut interval = ctx.duration_until_next_vsync().unwrap_or(nominal);
-                if interval < nominal / 2 {
-                    interval += nominal;
+                let (interval, period) = match if pacing_tracking { pll_next_tick(now, guard_ns) } else { None } {
+                    // headset-locked grid: the tick sits `guard` after the estimated arrival of the headset's tracking packet
+                    Some((tick, period)) => (tick.saturating_duration_since(now), period),
+                    None => {
+                        let mut interval = ctx.duration_until_next_vsync().unwrap_or(nominal);
+                        if interval < nominal / 2 {
+                            interval += nominal;
+                        }
+                        (interval, nominal)
+                    }
+                };
+                if pacing_tracking {
+                    if let Ok(pll) = PLL.lock() {
+                        if let Some(l) = pll.last {
+                            push_bounded(&TICK_AFTER_TRACKING_MS, now.saturating_duration_since(l).as_secs_f64() * 1000.0);
+                        }
+                    }
                 }
+                let nominal = period; // the tick spacing this grid runs at (the headset's period when locked)
                 LAST_TICK_NS.store(now.duration_since(origin).as_nanos() as u64, Ordering::Relaxed);
                 NEXT_TICK_NS.store((now + interval).duration_since(origin).as_nanos() as u64, Ordering::Relaxed);
+                LAST_TICK_QPC.store(logs::qpc_at(now).to_bits(), Ordering::Relaxed);
                 unsafe { nvh::nvh_ipc_vsync(ipc, interval.as_secs_f64()) };
                 ticks.fetch_add(1, Ordering::Relaxed);
                 VSYNC_TICKS.fetch_add(1, Ordering::Relaxed);
@@ -1576,6 +1793,14 @@ fn main() {
     let (mut encode_errors, mut consecutive_errors) = (0usize, 0usize);
     if !ipc.is_null() {
         push_user(ipc, user_gamma, debug_on);
+        unsafe { nvh::nvh_ipc_set_pacing(ipc, args.stamp_mode, args.fresh_wait_ms as f32) };
+        event(origin, "pacing_config", json!({ "stamp": stamp_name(args.stamp_mode), "fresh_wait_ms": args.fresh_wait_ms,
+            "pacing": if args.pacing_tracking { "tracking" } else { "grid" }, "pacing_guard_ms": args.pacing_guard_ms,
+            "send_pacing": if args.send_on_vsync { "vsync" } else { "asap" } }));
+        logs::general("INFO", &format!("frame stamping: {} (fresh wait {:.1} ms); display clock: {} (guard {:.1} ms); send pacing: {}",
+            match args.stamp_mode { 2 => "newest sample + rotation + pose extrapolation", 1 => "newest sample + rotation", _ => "rendered sample (pose match)" }, args.fresh_wait_ms,
+            if args.pacing_tracking { "locked to headset tracking" } else { "ALVR grid" }, args.pacing_guard_ms,
+            if args.send_on_vsync { "vsync" } else { "asap" }));
     }
     struct GameRun {
         exe: String,
@@ -1743,6 +1968,7 @@ fn main() {
                 if let Some((fov8, off6)) = last_views {
                     unsafe {
                         nvh::nvh_ipc_config(ipc, enc_handle, args.fps, eye_size.0, eye_size.1, fov8.as_ptr(), off6.as_ptr(), 10, read_encoding_gamma(&layout.session()));
+                        nvh::nvh_ipc_set_pacing(ipc, args.stamp_mode, args.fresh_wait_ms as f32);
                         nvh::nvh_ipc_set_connected(ipc, 1); // after the config: the shim waits for this flag
                     }
                     views_published = true;
@@ -1915,6 +2141,14 @@ fn main() {
             } else {
                 let last_tick = origin + Duration::from_nanos(LAST_TICK_NS.load(Ordering::Relaxed));
                 push_bounded(&SEND_PHASE_MS, Instant::now().saturating_duration_since(last_tick).as_secs_f64() * 1000.0);
+            }
+            {
+                // the host side of the per-frame timeline (debug mode), same clock as the shim's frames CSV
+                let hold_ms = HOLD_MS.lock().ok().and_then(|h| h.last().copied()).filter(|_| args.send_on_vsync).unwrap_or(0.0);
+                logs::csv("host_frames.csv", "frame,ts_ns,t_tick,t_intake,t_submit,encode_ms,t_send,hold_ms,bytes,idr",
+                    &format!("{counter},{},{:.6},{:.6},{:.6},{ms:.2},{:.6},{hold_ms:.2},{},{}", ts.as_nanos(),
+                        f64::from_bits(LAST_TICK_QPC.load(Ordering::Relaxed)), logs::qpc_at(intake), submit_s, logs::qpc_now(),
+                        l.packet_bytes, l.packet_idr as u8));
             }
             consecutive_errors = 0;
             encode_ms.push(ms);

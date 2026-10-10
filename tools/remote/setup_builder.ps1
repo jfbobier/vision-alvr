@@ -39,7 +39,7 @@ Step 'alvr_openvr_submodule' ($ov -eq $alvr.submodules.openvr) "$ov"
 $v = "$Src\VDXR"
 if (-not (Test-Path "$v\.git")) {
   git init -q $v
-  git -C $v remote add origin https://github.com/mbucchia/VirtualDesktop-OpenXR.git
+  git -C $v remote add origin $vdxr.fork   # VisionALVR fork (deps.lock.json): upstream is mbucchia/VirtualDesktop-OpenXR
   git -C $v fetch -q --depth 1 origin $vdxr.full_hash 2>&1 | Select-Object -Last 2
   git -C $v checkout -q FETCH_HEAD 2>&1 | Select-Object -Last 2
 }

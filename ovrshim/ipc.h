@@ -14,7 +14,7 @@
 namespace visionalvr_ipc {
 
 constexpr uint32_t kMagic = 0x56414C31; // 'VAL1'
-constexpr uint32_t kVersion = 11;
+constexpr uint32_t kVersion = 12;
 constexpr int kSlots = 4;
 
 struct Pose {
@@ -72,6 +72,11 @@ struct HostToShim {
     float colorBrightness, colorContrast, colorSaturation, colorSharpening; // user colour correction (0 = neutral), on the final output
     uint32_t debugOn;              // 1: write the verbose shim log into debugDir
     wchar_t debugDir[260];         // the host's debug session folder (logs/debug/<time>), empty when debug is off
+    // Frame stamping. 0: stamp each frame with the tracking sample the app rendered it with (pose matching). 1: stamp it with
+    // the newest sample and rotate the projection layers from the rendered orientation to that sample's (what SteamVR's
+    // compositor does): every frame carries a fresh, distinct timestamp, so the headset shows all of them.
+    uint32_t stampMode;            // 2: like 1, and the pose handed to the app is extrapolated to the expected stamp time (smaller warp)
+    float freshWaitMs;             // mode 1: when no sample arrived since the previous frame, wait up to this long for one (0 = never)
 };
 
 struct Haptic {

@@ -543,6 +543,11 @@ void nvh_ipc_set_user(void* i, float user_gamma, int debug_on, const wchar_t* de
     h.debugOn = debug_on ? 1 : 0;
 }
 
+void nvh_ipc_set_pacing(void* i, int stamp_mode, float fresh_wait_ms) {
+    auto& h = ((Ipc*)i)->state->host;
+    h.freshWaitMs = fresh_wait_ms; MemoryBarrier(); h.stampMode = stamp_mode;
+}
+
 void nvh_ipc_set_color(void* i, float brightness, float contrast, float saturation, float sharpening) {
     auto& h = ((Ipc*)i)->state->host;
     h.colorBrightness = brightness; h.colorContrast = contrast; h.colorSaturation = saturation; h.colorSharpening = sharpening;
