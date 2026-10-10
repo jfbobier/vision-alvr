@@ -14,7 +14,7 @@
 namespace visionalvr_ipc {
 
 constexpr uint32_t kMagic = 0x56414C31; // 'VAL1'
-constexpr uint32_t kVersion = 12;
+constexpr uint32_t kVersion = 13;
 constexpr int kSlots = 4;
 
 struct Pose {
@@ -77,6 +77,7 @@ struct HostToShim {
     // compositor does): every frame carries a fresh, distinct timestamp, so the headset shows all of them.
     uint32_t stampMode;            // 2: like 1, and the pose handed to the app is extrapolated to the expected stamp time (smaller warp)
     float freshWaitMs;             // mode 1: when no sample arrived since the previous frame, wait up to this long for one (0 = never)
+    float renderScale;             // recommended per-eye render size handed to the app = eyeWidth/Height * renderScale (0 = 1.0); the SBS frame keeps its size
 };
 
 struct Haptic {

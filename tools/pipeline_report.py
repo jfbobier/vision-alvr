@@ -58,7 +58,18 @@ def main(d):
         if not sf:
             continue
         print(f'\nApp frame timeline: {os.path.basename(path)} ({len(sf)} frames)')
-        byframe = {int(r['frame']): r for r in hf}
+        # the host's frame counter restarts for every app: join this shim CSV with the host segment that overlaps it in time
+        segs, cur = [], []
+        for r in hf:
+            if cur and r['frame'] < cur[-1]['frame']:
+                segs.append(cur)
+                cur = []
+            cur.append(r)
+        if cur:
+            segs.append(cur)
+        t0, t1 = min(r['t_submit'] for r in sf), max(r['t_submit'] for r in sf)
+        seg = max(segs, key=lambda g: sum(1 for r in g if t0 - 1 <= r['t_intake'] <= t1 + 1), default=[])
+        byframe = {int(r['frame']): r for r in seg}
         have_trace = [r for r in sf if r['t_wait_ret'] > 0]
         print(f'  frames with VDXR trace: {len(have_trace)} / {len(sf)}')
         if have_trace:

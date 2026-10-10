@@ -65,6 +65,8 @@ struct Args {
     pacing_tracking: bool,
     pacing_explicit: bool,
     pacing_guard_ms: f64,
+    /// app render size relative to the headset's per-eye size (GPU load lever; the stream keeps its size)
+    render_scale: f64,
     qp_map: Option<bool>,
     dump_qpmap: Option<PathBuf>,
     idle_rgb: Option<u32>,
@@ -130,6 +132,7 @@ fn parse_args() -> Result<Args, String> {
         pacing_tracking: true,
         pacing_explicit: false,
         pacing_guard_ms: 2.0,
+        render_scale: 1.0,
         qp_map: None,
         dump_qpmap: None,
         idle_rgb: None,
@@ -230,6 +233,7 @@ fn parse_args() -> Result<Args, String> {
                 a.pacing_tracking = parse_pacing(&v()?)?;
             }
             "--pacing-guard-ms" => a.pacing_guard_ms = v()?.parse().map_err(|e| format!("{e}"))?,
+            "--render-scale" => a.render_scale = v()?.parse().map_err(|e| format!("{e}"))?,
             "--qp-map" => {
                 a.qp_map = Some(match v()?.as_str() {
                     "on" | "1" => true,
@@ -349,6 +353,9 @@ fn apply_settings(a: &mut Args, st: &vision::Settings) {
     }
     if let Some(g) = st.pacing_guard_ms {
         a.pacing_guard_ms = g.clamp(0.0, 6.0);
+    }
+    if let Some(r) = st.render_scale {
+        a.render_scale = r.clamp(0.25, 2.0);
     }
     if a.idle_rgb.is_none() {
         a.idle_rgb = st.idle_rgb;
@@ -811,7 +818,7 @@ mod nvh {
         pub fn nvh_ipc_set_user(ipc: *mut c_void, user_gamma: f32, debug_on: i32, debug_dir: *const u16);
         pub fn nvh_ipc_app_exe(ipc: *mut c_void, buf: *mut c_char, len: i32) -> i32;
         pub fn nvh_ipc_set_color(ipc: *mut c_void, brightness: f32, contrast: f32, saturation: f32, sharpening: f32);
-        pub fn nvh_ipc_set_pacing(ipc: *mut c_void, stamp_mode: i32, fresh_wait_ms: f32);
+        pub fn nvh_ipc_set_pacing(ipc: *mut c_void, stamp_mode: i32, fresh_wait_ms: f32, render_scale: f32);
         pub fn nvh_gpu_info(buf: *mut c_char, len: i32) -> i32;
         pub fn nvh_gpu_sample(buf: *mut c_char, len: i32) -> i32;
         pub fn nvh_ipc_shim_stats(ipc: *mut c_void, submit_mode: *mut u32, ts_matched: *mut u32, ts_fallback: *mut u32);
@@ -1793,8 +1800,8 @@ fn main() {
     let (mut encode_errors, mut consecutive_errors) = (0usize, 0usize);
     if !ipc.is_null() {
         push_user(ipc, user_gamma, debug_on);
-        unsafe { nvh::nvh_ipc_set_pacing(ipc, args.stamp_mode, args.fresh_wait_ms as f32) };
-        event(origin, "pacing_config", json!({ "stamp": stamp_name(args.stamp_mode), "fresh_wait_ms": args.fresh_wait_ms,
+        unsafe { nvh::nvh_ipc_set_pacing(ipc, args.stamp_mode, args.fresh_wait_ms as f32, args.render_scale as f32) };
+        event(origin, "pacing_config", json!({ "stamp": stamp_name(args.stamp_mode), "fresh_wait_ms": args.fresh_wait_ms, "render_scale": args.render_scale,
             "pacing": if args.pacing_tracking { "tracking" } else { "grid" }, "pacing_guard_ms": args.pacing_guard_ms,
             "send_pacing": if args.send_on_vsync { "vsync" } else { "asap" } }));
         logs::general("INFO", &format!("frame stamping: {} (fresh wait {:.1} ms); display clock: {} (guard {:.1} ms); send pacing: {}",
@@ -1968,7 +1975,7 @@ fn main() {
                 if let Some((fov8, off6)) = last_views {
                     unsafe {
                         nvh::nvh_ipc_config(ipc, enc_handle, args.fps, eye_size.0, eye_size.1, fov8.as_ptr(), off6.as_ptr(), 10, read_encoding_gamma(&layout.session()));
-                        nvh::nvh_ipc_set_pacing(ipc, args.stamp_mode, args.fresh_wait_ms as f32);
+                        nvh::nvh_ipc_set_pacing(ipc, args.stamp_mode, args.fresh_wait_ms as f32, args.render_scale as f32);
                         nvh::nvh_ipc_set_connected(ipc, 1); // after the config: the shim waits for this flag
                     }
                     views_published = true;

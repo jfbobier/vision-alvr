@@ -1772,7 +1772,14 @@ namespace {
                 m_photonsTime = 1.f / m_displayRate;
             }
             if (initial && h.eyeWidth > 0 && h.eyeHeight > 0) {
-                m_recommendedResolution = {h.eyeWidth, h.eyeHeight};
+                // The app renders at this size (GPU cost); the composed SBS frame keeps the headset's size and the projection pass
+                // resamples. renderScale < 1 is the lever for GPU-bound games (SteamVR's "resolution per eye" slider).
+                const float scale = (h.renderScale > 0.25f && h.renderScale <= 2.f) ? h.renderScale : 1.f;
+                m_recommendedResolution = {(int)(h.eyeWidth * scale + 0.5f) & ~1, (int)(h.eyeHeight * scale + 0.5f) & ~1};
+                if (scale != 1.f) {
+                    ShimLog("render scale %.2f: app renders %d x %d per eye (headset %d x %d)", scale, m_recommendedResolution.w,
+                            m_recommendedResolution.h, h.eyeWidth, h.eyeHeight);
+                }
             }
             for (int e = 0; e < 2; e++) {
                 if (h.eyeFovTan[e][0] > 0) {

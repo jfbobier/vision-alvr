@@ -42,6 +42,8 @@ pub struct Settings {
     /// "tracking" (default): display clock locked to the headset's tracking packets (its real display rate); "grid": ALVR's free-running grid
     pub pacing: Option<String>,
     pub pacing_guard_ms: Option<f64>,
+    /// the app's per-eye render size relative to the headset's (1.0); < 1 for GPU-bound games
+    pub render_scale: Option<f64>,
     pub gpu_priority: Option<i64>,
     pub debug: Option<bool>,
     pub gamma: Option<f32>,
@@ -64,6 +66,7 @@ pub fn load_settings(path: &Path) -> Settings {
         fresh_wait_ms: video["fresh_wait_ms"].as_f64(),
         pacing: video["pacing"].as_str().map(str::to_string),
         pacing_guard_ms: video["pacing_guard_ms"].as_f64(),
+        render_scale: video["render_scale"].as_f64(),
         gpu_priority: video["gpu_priority"].as_i64(),
         debug: v["debug"].as_bool(),
         gamma: v["display"]["gamma"].as_f64().map(|g| g as f32),
