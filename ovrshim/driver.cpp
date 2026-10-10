@@ -781,6 +781,21 @@ namespace {
                     m_waitTimeouts++;
                 }
                 m_waitWaited++;
+                lock.unlock();
+                {
+                    // GPU throttle, like a real runtime (and SteamVR's WaitGetPoses): the app may start a new frame only when at
+                    // most one of its submitted frames is still completing on the GPU. Without it a GPU-bound app runs several
+                    // frames ahead, its frames then complete in bunches (two in one display period, then none) and the stream
+                    // skips and repeats instead of showing one frame per period.
+                    std::unique_lock plock(m_publishMutex);
+                    if (!m_publishCv.wait_for(plock, 50ms, [&] { return m_publishQueue.size() <= 1; })) {
+                        m_gpuThrottleTimeouts++;
+                    } else if (m_publishQueue.size() == 1) {
+                        // (one still in flight is the normal pipelined case)
+                    }
+                    m_gpuThrottleWaits++;
+                }
+                lock.lock();
                 m_lastWaitedFrame = std::max(m_lastWaitedFrame, frameIndex);
 
                 TraceLoggingWriteStop(wait,
@@ -1322,11 +1337,13 @@ namespace {
                     m_statTicks0 = m_lastSignaledVsync;
                     ShimLog("frames %llu: %.1f fps, vsync %.1f Hz (host %u events, %u local timeouts), last compose+GPU %.2f ms, "
                             "layers %d, ts matched %u (by display time %llu) / fallback %u; vsync ticks %lld, "
-                            "WaitToBeginFrame calls %llu (waited %llu, repeated index %llu, timeouts %llu); publish drops %u",
+                            "WaitToBeginFrame calls %llu (waited %llu, repeated index %llu, timeouts %llu); publish drops %u; "
+                            "GPU throttle timeouts %u",
                             (unsigned long long)m_framesSubmitted, fps, rate, (unsigned)m_vsyncFromHost, (unsigned)m_vsyncTimeouts,
                             st.lastComposeMs, composed, st.tsMatched, (unsigned long long)m_tsByDisplayTime, st.tsFallback,
                             m_lastSignaledVsync, (unsigned long long)m_waitCalls, (unsigned long long)m_waitWaited,
-                            (unsigned long long)m_waitRepeatedIndex, (unsigned long long)m_waitTimeouts, m_diagPublishDropped);
+                            (unsigned long long)m_waitRepeatedIndex, (unsigned long long)m_waitTimeouts, m_diagPublishDropped,
+                            m_gpuThrottleTimeouts);
                     auto pct = [](std::vector<float>& v, double q) {
                         if (v.empty()) {
                             return 0.0f;
@@ -2215,6 +2232,7 @@ namespace {
         std::vector<float> m_diagWarpMdeg, m_diagWarpAgeMs, m_diagFreshWaitMs; // stampMode 1 diagnostics
         uint32_t m_diagFreshWaits{0}, m_diagStillStale{0};
         uint32_t m_diagPublishDropped{0}; // frames dropped before publish because 3 were already in flight (never blocks the game)
+        uint32_t m_gpuThrottleWaits{0}, m_gpuThrottleTimeouts{0}; // WaitForVsync GPU throttle (frames in flight <= 2)
         // stampMode 2: head velocity from the tracking samples and the extrapolation horizon (see GetHmdPose)
         struct SampleRef {
             uint64_t clientTsNs{0};
