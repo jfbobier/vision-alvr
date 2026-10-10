@@ -74,14 +74,20 @@ def main(path, pc='192.168.1.2', hmd='192.168.1.14', port=9944):
     video = {}      # packet index -> dict(ts, t_first, t_last, shards, bytes)
     tracking = []   # (t_arrival, ts)
     stats = []      # (t_arrival, dict)
-    other = collections.Counter(); total = 0
+    other = collections.Counter(); total = 0; dupes = 0
+    seen = set()  # pktmon logs the same packet once per network component it passes: keep the first copy of each shard
     for t, frame, origlen, lt in read_pcapng(path):
         u = udp_payload(frame, lt)
         if not u: continue
         src, dst, sport, dport, pl, ulen = u
         if port not in (sport, dport) or len(pl) < 18: continue
-        total += 1
         plen, sid, pidx, shards, sidx = struct.unpack_from('!IHIII', pl, 0)
+        key = (src, sid, pidx, sidx)
+        if key in seen:
+            dupes += 1
+            continue
+        seen.add(key)
+        total += 1
         if src == pc and sid == 3:
             e = video.setdefault(pidx, {'ts': None, 't_first': t, 't_last': t, 'shards': 0, 'bytes': 0, 'idr': 0, 'count': shards})
             e['t_last'] = max(e['t_last'], t); e['shards'] += 1; e['bytes'] += ulen
@@ -95,13 +101,17 @@ def main(path, pc='192.168.1.2', hmd='192.168.1.14', port=9944):
         else:
             other[(src == pc, sid)] += 1
     frames = sorted((e for e in video.values() if e['ts'] is not None), key=lambda e: e['t_first'])
-    print(f'{path}: {total} ALVR packets; video frames {len(frames)} ({sum(e["shards"] for e in frames)} shards, complete {sum(1 for e in frames if e["shards"] == e["count"])}), tracking {len(tracking)}, statistics {len(stats)}; other {dict(other)}')
+    print(f'{path}: {total} ALVR packets ({dupes} duplicate copies dropped); video frames {len(frames)} ({sum(e["shards"] for e in frames)} shards, complete {sum(1 for e in frames if e["shards"] == e["count"])}), tracking {len(tracking)}, statistics {len(stats)}; other {dict(other)}')
     if not frames: return
     span = frames[-1]['t_first'] - frames[0]['t_first']
     print(f'  span {span:.1f} s, video {len(frames) / span:.1f} frames/s, {sum(e["bytes"] for e in frames) * 8 / span / 1e6:.0f} Mbps, tracking {len(tracking) / span:.1f}/s, statistics {len(stats) / span:.1f}/s')
 
     print('\nServer -> headset (video)')
-    si = [b['t_first'] - a['t_first'] for a, b in zip(frames, frames[1:])]
+    # spacing between consecutive packet indices only: a capture that dropped packets must not look like delivery gaps
+    byidx = sorted((i, e) for i, e in video.items() if e['ts'] is not None)
+    si = [b['t_first'] - a['t_first'] for (ia, a), (ib, b) in zip(byidx, byidx[1:]) if ib == ia + 1]
+    miss = sum(ib - ia - 1 for (ia, _), (ib, _) in zip(byidx, byidx[1:]) if ib > ia)
+    print(f'  capture completeness: {miss} video packets missing from the capture (index gaps)')
     dist('send interval (first shard to first shard)', si)
     print(f'  {"send intervals > 16.5 ms / < 6 ms":46s} {sum(1 for x in si if x > 0.0165)} / {sum(1 for x in si if x < 0.006)}')
     dist('frame on the wire (first to last shard)', [e['t_last'] - e['t_first'] for e in frames])

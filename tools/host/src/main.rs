@@ -482,11 +482,35 @@ static NEXT_TICK_NS: AtomicU64 = AtomicU64::new(0);
 static SAME_TS_FRAMES: AtomicU64 = AtomicU64::new(0);
 /// slot pacing: frames skipped (never encoded) because a newer one arrived before the delivery slot
 static SLOT_SKIPPED: AtomicU64 = AtomicU64::new(0);
+/// slot pacing: slots without a new app frame that carried the previous frame again (same timestamp)
+static SLOT_FILLED: AtomicU64 = AtomicU64::new(0);
 /// slot pacing: the current send offset after the tick (f64 bits, ms) and whether the stats windows may adjust it
 static SEND_OFFSET_MS: AtomicU64 = AtomicU64::new(0);
 static SEND_OFFSET_AUTO: AtomicBool = AtomicBool::new(false);
-/// the headset's decoder-queue dwell the auto offset aims at: mid-slot, so early and late arrivals are tolerated alike
-const SLOT_TARGET_DWELL_MS: f64 = 5.5;
+/// slot pacing: where in the display period the app's frames become ready (ms after the tick, EMA): the encode boundary
+/// sits half a period away from it, so a frame is never superseded by the next one just before its slot
+static COMPLETION_PHASE_MS: AtomicU64 = AtomicU64::new(0);
+/// the display clock's guard after the estimated tracking arrival (ns): steered from the headset's queue dwell
+static PLL_GUARD_NS: AtomicU64 = AtomicU64::new(2_000_000);
+
+/// Slot pacing: (encode start, send deadline) of the slot a frame ready now goes into. The encode boundary is the app's
+/// completion phase + half a period (or `send_offset_ms` when the automatic placement is off); the send is `lead` later.
+fn slot_times(now: Instant, origin: Instant, lead: Duration) -> (Instant, Instant) {
+    let period_ns = NEXT_TICK_NS.load(Ordering::Relaxed).saturating_sub(LAST_TICK_NS.load(Ordering::Relaxed)).clamp(5_000_000, 20_000_000);
+    let period = Duration::from_nanos(period_ns);
+    let boundary_ms = if SEND_OFFSET_AUTO.load(Ordering::Relaxed) {
+        (f64::from_bits(COMPLETION_PHASE_MS.load(Ordering::Relaxed)) + period_ns as f64 / 2e6).rem_euclid(period_ns as f64 / 1e6)
+    } else {
+        f64::from_bits(SEND_OFFSET_MS.load(Ordering::Relaxed))
+    };
+    let mut encode_at = origin + Duration::from_nanos(LAST_TICK_NS.load(Ordering::Relaxed)) + Duration::from_secs_f64(boundary_ms / 1000.0);
+    while encode_at <= now {
+        encode_at += period;
+    }
+    (encode_at, encode_at + lead)
+}
+/// the headset decoder-queue dwell the guard steering aims at (ms)
+const SLOT_TARGET_DWELL_MS: f64 = 10.0; // SteamVR + ALVR sits here: a late frame shifts the headset one slot, an early one costs nothing
 /// send instant relative to the display-clock tick (asap: render + encode time; vsync pacing: lateness after the tick)
 static SEND_PHASE_MS: std::sync::Mutex<Vec<f64>> = std::sync::Mutex::new(Vec::new());
 /// time an encoded frame waited for the tick (vsync pacing only; 0 = the frame was already late)
@@ -667,24 +691,28 @@ impl StatsWindow {
         }
         if let Some(c) = logs::client_stats::take(0) {
             if SEND_OFFSET_AUTO.load(Ordering::Relaxed) {
-                // slot pacing: steer the send offset so frames become ready mid-slot at the headset (its decoder-queue dwell
-                // is the time from decode to the pick-up poll: too long = we send too early, too short = too late)
+                // slot pacing: the send phase follows the app's completion phase (slot_times), so the headset-side phase is
+                // steered with the display clock's guard: a later tick means later sends and a shorter dwell at the headset
+                // (its decoder-queue dwell is the time from decode to the pick-up poll; mid-slot tolerates jitter both ways)
                 if let (Some(dq), Some(n)) = (c["decoder_queue_ms"].as_f64(), c["samples"].as_u64()) {
                     if n >= 30 && dq > 0.0 && dq < 40.0 {
                         let period_ms = (NEXT_TICK_NS.load(Ordering::Relaxed).saturating_sub(LAST_TICK_NS.load(Ordering::Relaxed)) as f64 / 1e6).clamp(5.0, 20.0);
                         let dwell = dq % period_ms; // a frame queued behind another one shows one extra period
-                        let off = f64::from_bits(SEND_OFFSET_MS.load(Ordering::Relaxed));
-                        let new = (off + 0.3 * (dwell - SLOT_TARGET_DWELL_MS)).rem_euclid(period_ms);
-                        SEND_OFFSET_MS.store(new.to_bits(), Ordering::Relaxed);
+                        let guard = PLL_GUARD_NS.load(Ordering::Relaxed) as f64 / 1e6;
+                        let new = (guard + 0.3 * (dwell - SLOT_TARGET_DWELL_MS)).clamp(0.5, 9.0);
+                        PLL_GUARD_NS.store((new * 1e6) as u64, Ordering::Relaxed);
                     }
                 }
             }
             e["send_offset_ms"] = json!(f64::from_bits(SEND_OFFSET_MS.load(Ordering::Relaxed)));
+            e["completion_phase_ms"] = json!(f64::from_bits(COMPLETION_PHASE_MS.load(Ordering::Relaxed)));
+            e["pacing_guard_ms"] = json!(PLL_GUARD_NS.load(Ordering::Relaxed) as f64 / 1e6);
             e["client"] = c; // ALVR's client statistics over the window: total / encode / network / decode latency, client fps
         }
         // pacing diagnostics (moving-head judder investigation): duplicate timestamps, tracking spacing, send phase
         e["same_ts_frames"] = json!(SAME_TS_FRAMES.swap(0, Ordering::Relaxed));
         e["slot_skipped"] = json!(SLOT_SKIPPED.swap(0, Ordering::Relaxed));
+        e["slot_filled"] = json!(SLOT_FILLED.swap(0, Ordering::Relaxed));
         if let Ok(mut g) = TRACKING_GAP_MS.lock() {
             if !g.is_empty() {
                 let mut v = std::mem::take(&mut *g);
@@ -1748,7 +1776,8 @@ fn main() {
     let vsync_thread = if args.shim {
         let (ctx, ticks, period_ns, stop) = (Arc::clone(&ctx), Arc::clone(&vsync_ticks), Arc::clone(&vsync_period_ns), Arc::clone(&vsync_stop));
         let daemon = args.daemon;
-        let (pacing_tracking, guard_ns) = (args.pacing_tracking, args.pacing_guard_ms * 1e6);
+        let pacing_tracking = args.pacing_tracking;
+        PLL_GUARD_NS.store((args.pacing_guard_ms * 1e6) as u64, Ordering::Relaxed);
         Some(thread::spawn(move || {
             #[cfg(windows)]
             unsafe {
@@ -1777,6 +1806,7 @@ fn main() {
                 // therefore lands a few microseconds BEFORE the grid point, and ALVR then answers "a few microseconds". Clamping
                 // that to 0.5 ms produced a second tick 0.5 ms later on ~15-20% of ticks (~107 Hz instead of 90: apps ran at
                 // 97-111 fps in the first headset test). A remainder under half a period means "this grid point": aim at the next.
+                let guard_ns = PLL_GUARD_NS.load(Ordering::Relaxed) as f64;
                 let (interval, period) = match if pacing_tracking { pll_next_tick(now, guard_ns) } else { None } {
                     // headset-locked grid: the tick sits `guard` after the estimated arrival of the headset's tracking packet
                     Some((tick, period)) => (tick.saturating_duration_since(now), period),
@@ -1822,6 +1852,10 @@ fn main() {
     };
     let mut last_green_tick = 0u64;
     let mut last_sent_ts = Duration::ZERO;
+    // slot pacing: the last app frame sent (ring slot, timestamp, shim counter) and when, for filling empty slots
+    let mut last_app_frame: Option<(u32, Duration, u64)> = None;
+    let mut last_app_frame_at = Instant::now();
+    let mut fills_in_row = 0u32;
     let mut stats_win = StatsWindow::new();
     let mut intake_ms: Vec<f64> = vec![];
     let mut last_intake: Option<Instant> = None;
@@ -2095,7 +2129,55 @@ fn main() {
                 green_active = false;
             }
             let (mut counter, mut slot, mut cts, mut submit_s) = (0u64, 0u32, 0u64, 0f64);
-            if unsafe { nvh::nvh_ipc_wait_frame(ipc, wait_ms, &mut counter, &mut slot, &mut cts, &mut submit_s) } == 0 {
+            let mut have_frame = unsafe { nvh::nvh_ipc_wait_frame(ipc, wait_ms, &mut counter, &mut slot, &mut cts, &mut submit_s) } != 0;
+            if !app_alive {
+                last_app_frame = None;
+            }
+            if !have_frame && args.send_slot && connected && app_alive {
+                if let Some((ls, lts, lc)) = last_app_frame {
+                    // SteamVR-compositor semantics: a display slot without a new app frame carries the previous frame again,
+                    // with its timestamp. The headset shows it as already seen, but its frame queue stays primed, so a missed
+                    // game frame no longer turns into a repeat-then-drop cascade at the headset. Capped: a game that stops
+                    // submitting (loading screen) gets ~0.5 s of fills, then the headset re-presents on its own as before.
+                    let (encode_at, deadline) = slot_times(Instant::now(), origin, Duration::from_secs_f64(args.encode_lead_ms / 1000.0));
+                    loop {
+                        let left = encode_at.saturating_duration_since(Instant::now());
+                        if left.is_zero() {
+                            break;
+                        }
+                        let w = if left > Duration::from_millis(2) { 1 } else { 0 };
+                        if unsafe { nvh::nvh_ipc_wait_frame(ipc, w, &mut counter, &mut slot, &mut cts, &mut submit_s) } != 0 {
+                            have_frame = true;
+                            break;
+                        } else if w == 0 {
+                            std::hint::spin_loop();
+                        }
+                    }
+                    if !have_frame && fills_in_row < 45 && deadline.saturating_duration_since(last_app_frame_at) < Duration::from_millis(600) {
+                        let l = live.as_mut().unwrap();
+                        l.packet_bytes = 0;
+                        l.packet_idr = false;
+                        l.pending.clear();
+                        l.hold_now = true;
+                        let mut err = [0 as std::ffi::c_char; 256];
+                        let ms = unsafe { nvh::nvh_encode_shared(enc_handle, ipc, ls, lc as u32, lts.as_nanos() as u64, 0, err.as_mut_ptr(), 256) };
+                        l.hold_now = false;
+                        if ms >= 0.0 {
+                            if deadline > Instant::now() {
+                                sleep_spin_until(deadline);
+                            }
+                            flush_pending(l);
+                            fills_in_row += 1;
+                            SLOT_FILLED.fetch_add(1, Ordering::Relaxed);
+                            shared.bytes_sent.fetch_add(l.packet_bytes as u64, Ordering::Relaxed);
+                        } else {
+                            l.pending.clear();
+                        }
+                        continue;
+                    }
+                }
+            }
+            if !have_frame {
                 // No app frame. With no OpenXR app running, keep the headset fed with pure green (it chroma-keys green, so
                 // the user sees through). If an app is alive but stalled, send nothing: the headset re-presents its last frame.
                 let tick = vsync_ticks.load(Ordering::Relaxed);
@@ -2153,18 +2235,25 @@ fn main() {
                 // tick + send_offset_ms, one per slot, newest wins. A frame ready between two grid points waits for the next
                 // one; if a newer frame arrives while it waits, the older one is skipped before it is encoded (the headset's
                 // 2-deep queue would have dropped one of them anyway, after decoding both).
-                let period = Duration::from_nanos(NEXT_TICK_NS.load(Ordering::Relaxed).saturating_sub(LAST_TICK_NS.load(Ordering::Relaxed)).clamp(5_000_000, 20_000_000));
-                let offset = Duration::from_secs_f64(f64::from_bits(SEND_OFFSET_MS.load(Ordering::Relaxed)) / 1000.0);
-                let lead = Duration::from_secs_f64(args.encode_lead_ms / 1000.0);
-                let mut deadline = origin + Duration::from_nanos(LAST_TICK_NS.load(Ordering::Relaxed)) + offset;
                 let now0 = Instant::now();
-                // the next slot; encoding starts `lead` before it (or right away when the slot is closer than that, the
-                // packet then goes out as soon as it is ready, a little late rather than a whole slot later)
-                while deadline <= now0 {
-                    deadline += period;
+                {
+                    // where in the period this frame became ready (ms after the tick): the encode boundary follows it
+                    let period_ns = NEXT_TICK_NS.load(Ordering::Relaxed).saturating_sub(LAST_TICK_NS.load(Ordering::Relaxed)).clamp(5_000_000, 20_000_000) as f64;
+                    let since_tick = now0.saturating_duration_since(origin + Duration::from_nanos(LAST_TICK_NS.load(Ordering::Relaxed))).as_nanos() as f64;
+                    let phase = (since_tick % period_ns) / 1e6;
+                    let prev = f64::from_bits(COMPLETION_PHASE_MS.load(Ordering::Relaxed));
+                    // circular EMA (phases wrap): move towards the new phase the short way round
+                    let period_ms = period_ns / 1e6;
+                    let mut d = phase - prev;
+                    if d > period_ms / 2.0 {
+                        d -= period_ms;
+                    } else if d < -period_ms / 2.0 {
+                        d += period_ms;
+                    }
+                    COMPLETION_PHASE_MS.store((prev + 0.1 * d).rem_euclid(period_ms).to_bits(), Ordering::Relaxed);
                 }
+                let (encode_at, deadline) = slot_times(now0, origin, Duration::from_secs_f64(args.encode_lead_ms / 1000.0));
                 slot_deadline = Some(deadline);
-                let encode_at = if deadline.saturating_duration_since(now0) > lead { deadline - lead } else { now0 };
                 let mut skipped = 0u32;
                 loop {
                     let left = encode_at.saturating_duration_since(Instant::now());
@@ -2271,6 +2360,9 @@ fn main() {
             stats_win.tick(origin, &encode_ms, shared.bytes_sent.load(Ordering::Relaxed) + l.packet_bytes as u64, Some(&**l), Some(shim_stats), &intake_ms, &ffr_wait_ms);
             compose_ms.push(unsafe { nvh::nvh_ipc_last_compose_ms(ipc) } as f64);
             ffr_ms.push(unsafe { nvh::nvh_last_ffr_gpu_ms(enc_handle) } as f64);
+            last_app_frame = Some((slot, ts, counter));
+            last_app_frame_at = Instant::now();
+            fills_in_row = 0;
             // frame column = the shim's frame counter (what the app submitted), so the harness can match app frames
             frame_rows.push(format!("{counter},{},{},{},{ms:.2}", ts.as_nanos(), l.packet_bytes, l.packet_idr as u8));
             sent_ts.push(ts.as_nanos() as u64);
